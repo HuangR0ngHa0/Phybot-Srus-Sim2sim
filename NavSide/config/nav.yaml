@@ -1,0 +1,36 @@
+models:
+  encoder_path: ../models/vae_encoder.onnx
+  policy_path: ../models/nav_policy.onnx
+
+control:
+  dry_run_hz: 5.0
+  vx_max: 0.45
+  wz_max: 0.4
+  walk_threshold: 0.3
+  goal_pos_tolerance: 0.08
+
+depth:
+  min_depth: 0.25
+  max_depth: 10.0
+
+goal:
+  default_goal_w: [5.0, 1.0, 0.0]
+
+logging:
+  verbose_sru: false
+  summary_hz: 1.0
+
+sim:
+  # This path preserves the exact scene/depth setup already validated in the
+  # VIPlanner SRU path. Later we can copy the resource tree into this workspace.
+  mujoco_xml_path: /home/ubuntu/VIPlanner/vi_planner-main/deplay/resources/robots/phybot_mini_mark2/xml/phybot_real.xml
+  camera_name: head_camera
+  render_width: 848
+  render_height: 480
+  render_fps: 30.0
+
+udp:
+  local_ip: 127.0.0.1
+  local_port: 8081
+  remote_ip: 127.0.0.1
+  remote_port: 8080
