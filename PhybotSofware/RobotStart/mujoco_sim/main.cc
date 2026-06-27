@@ -21,6 +21,7 @@
 #include <memory>
 #include <mutex>
 #include <new>
+#include <cmath>
 #include <string>
 #include <thread>
 
@@ -73,6 +74,64 @@ bool g_start_rl_walk = false;
 // model and data
 mjModel* m = nullptr;
 mjData* d = nullptr;
+
+YAML::Node LoadSpawnConfig(std::string& source_path) {
+  const std::vector<std::string> navside_paths = {
+    "../NavSide/config/nav_molmospaces_procthor.yaml",
+    "../../NavSide/config/nav_molmospaces_procthor.yaml",
+    "/home/ubuntu/sru_mujoco_sim/NavSide/config/nav_molmospaces_procthor.yaml",
+  };
+
+  for (const std::string& navside_path : navside_paths) {
+    try {
+      YAML::Node navside_config = YAML::LoadFile(navside_path);
+      if (navside_config["sim"] && navside_config["sim"]["spawn_w"]) {
+        source_path = navside_path;
+        return navside_config["sim"];
+      }
+    } catch (const YAML::Exception& e) {
+      std::cout << "[RobotSide] NavSide spawn config unavailable at "
+                << navside_path << ": " << e.what() << std::endl;
+    }
+  }
+
+  const std::string robotside_path = "../MujocoInterface/config/mujoco_sim.yaml";
+  source_path = robotside_path;
+  return YAML::LoadFile(robotside_path);
+}
+
+void ApplyConfiguredSpawn(mjModel* model, mjData* data) {
+  if (!model || !data) {
+    return;
+  }
+
+  std::string file_path;
+  YAML::Node config = LoadSpawnConfig(file_path);
+  if (!config["spawn_w"]) {
+    return;
+  }
+
+  const std::vector<double> spawn = config["spawn_w"].as<std::vector<double>>();
+  if (spawn.size() != 3 || model->nq < 7) {
+    std::cerr << "[RobotSide] invalid spawn_w in " << file_path << std::endl;
+    return;
+  }
+
+  const double yaw = config["spawn_yaw"] ? config["spawn_yaw"].as<double>() : 0.0;
+  const double half_yaw = 0.5 * yaw;
+  data->qpos[0] = spawn[0];
+  data->qpos[1] = spawn[1];
+  data->qpos[2] = spawn[2];
+  data->qpos[3] = std::cos(half_yaw);
+  data->qpos[4] = 0.0;
+  data->qpos[5] = 0.0;
+  data->qpos[6] = std::sin(half_yaw);
+  mj_forward(model, data);
+
+  std::cout << "[RobotSide] spawn source=" << file_path << std::endl;
+  std::cout << "[RobotSide] applied spawn_w=[" << spawn[0] << ", " << spawn[1]
+            << ", " << spawn[2] << "] spawn_yaw=" << yaw << std::endl;
+}
 
 // ******
 // low_cmd_t recvCmd;
@@ -239,6 +298,7 @@ void PhysicsLoop(mj::Simulate& sim, mjvCamera* cam) {
       mjData* dnew = nullptr;
       if (mnew) dnew = mj_makeData(mnew);
       if (dnew) {
+        ApplyConfiguredSpawn(mnew, dnew);
         sim.Load(mnew, dnew, sim.filename);
 
         mj_deleteData(d);
@@ -481,6 +541,7 @@ void PhysicsThread(mj::Simulate* sim, const char* filename, mjvCamera* cam) {
       // ********************************
 
       mju_copy(d->qpos, m->key_qpos, m->nq*1); // set ini pos in Mujoco
+      ApplyConfiguredSpawn(m, d);
       //   // ********************************
 
       mj_forward(m, d);

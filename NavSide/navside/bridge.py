@@ -12,14 +12,6 @@ SRU2_MAGIC = 0x32555253
 
 
 @dataclass
-class LegacyStatePacket:
-    x: float
-    y: float
-    yaw: float
-    source: str = "legacy_3f"
-
-
-@dataclass
 class NavStatePacketV2:
     seq: int
     timestamp_sec: float
@@ -52,7 +44,6 @@ class RobotComm(threading.Thread):
     ):
         super().__init__()
         self.cmd_packer = struct.Struct("3f")
-        self.legacy_state_unpacker = struct.Struct("3f")
         self.nav_state_v2_unpacker = struct.Struct("<IHHId16f")
         self.local_addr = (local_ip, local_port)
         self.remote_addr = (remote_ip, remote_port)
@@ -87,30 +78,26 @@ class RobotComm(threading.Thread):
             return self.latest_state
 
     def _parse_state_packet(self, data: bytes):
-        if len(data) == self.nav_state_v2_unpacker.size:
-            unpacked = self.nav_state_v2_unpacker.unpack(data)
-            magic, version, _flags, seq, timestamp_sec = unpacked[:5]
-            if magic != SRU2_MAGIC or version != 2:
-                print(f"[UDP] invalid NavStatePacketV2 header: magic={magic:#x} version={version}")
-                return None
+        if len(data) != self.nav_state_v2_unpacker.size:
+            print(f"[UDP] unexpected state packet size: {len(data)} bytes")
+            return None
 
-            values = np.asarray(unpacked[5:], dtype=np.float32)
-            return NavStatePacketV2(
-                seq=int(seq),
-                timestamp_sec=float(timestamp_sec),
-                linear_vel_b=values[0:3].copy(),
-                angular_vel_b=values[3:6].copy(),
-                projected_gravity_b=values[6:9].copy(),
-                robot_pos_w=values[9:12].copy(),
-                robot_quat_wxyz=values[12:16].copy(),
-            )
+        unpacked = self.nav_state_v2_unpacker.unpack(data)
+        magic, version, _flags, seq, timestamp_sec = unpacked[:5]
+        if magic != SRU2_MAGIC or version != 2:
+            print(f"[UDP] invalid NavStatePacketV2 header: magic={magic:#x} version={version}")
+            return None
 
-        if len(data) == self.legacy_state_unpacker.size:
-            x, y, yaw = self.legacy_state_unpacker.unpack(data)
-            return LegacyStatePacket(float(x), float(y), float(yaw))
-
-        print(f"[UDP] unexpected state packet size: {len(data)} bytes")
-        return None
+        values = np.asarray(unpacked[5:], dtype=np.float32)
+        return NavStatePacketV2(
+            seq=int(seq),
+            timestamp_sec=float(timestamp_sec),
+            linear_vel_b=values[0:3].copy(),
+            angular_vel_b=values[3:6].copy(),
+            projected_gravity_b=values[6:9].copy(),
+            robot_pos_w=values[9:12].copy(),
+            robot_quat_wxyz=values[12:16].copy(),
+        )
 
     def send_command(self, vx: float, vy: float, wz: float):
         packet = self.cmd_packer.pack(float(vx), float(vy), float(wz))

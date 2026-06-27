@@ -17,8 +17,6 @@
 Keep only the SRU navigation core required for sim2sim.
 Do not bring VIPlanner legacy paths into NavSide.
 
-## VIPlanner-compatible sim mode
-- `--sim-dry-run`: MuJoCo depth + SRU policy diagnostics, no UDP command send.
+## Sim mode
 - `--sim-control`: MuJoCo depth + SRU policy + UDP command send to robot-side `8080`.
 - Preferred robot-side state is `NavStatePacketV2`, 84 bytes, parsed as `<IHHId16f`.
-- Legacy robot-side state compatibility remains `3f`: `x`, `y`, `yaw`.

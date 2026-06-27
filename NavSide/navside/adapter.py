@@ -1,6 +1,5 @@
 import os
 import time
-from dataclasses import dataclass
 from typing import Dict, Optional
 
 import cv2
@@ -14,53 +13,10 @@ STATE_DIM = 16
 DEPTH_EMBEDDING_DIM = 2560
 LSTM_HIDDEN_DIM = 512
 DEFAULT_POLICY_SCALE = np.array([1.5, 1.0, 1.0], dtype=np.float32)
-
-
-@dataclass
-class MujocoStateEstimator:
-    """Extract SRU-style body-frame state from MuJoCo qpos over wall-clock time."""
-
-    prev_time: Optional[float] = None
-    prev_pos_w: Optional[np.ndarray] = None
-    prev_yaw: Optional[float] = None
-
-    def extract(self, data, timestamp: float) -> SruRobotState:
-        robot_pos_w = np.array([data.qpos[0], data.qpos[1], data.qpos[2]], dtype=np.float32)
-        robot_quat_wxyz = np.array(
-            [data.qpos[3], data.qpos[4], data.qpos[5], data.qpos[6]], dtype=np.float32
-        )
-        quat_xyzw = np.array(
-            [robot_quat_wxyz[1], robot_quat_wxyz[2], robot_quat_wxyz[3], robot_quat_wxyz[0]],
-            dtype=np.float32,
-        )
-        rot_wb = R.from_quat(quat_xyzw)
-
-        if self.prev_time is None:
-            linear_vel_w = np.zeros(3, dtype=np.float32)
-            angular_vel_w = np.zeros(3, dtype=np.float32)
-        else:
-            dt = max(timestamp - self.prev_time, 1e-6)
-            linear_vel_w = ((robot_pos_w - self.prev_pos_w) / dt).astype(np.float32)
-
-            yaw = rot_wb.as_euler("xyz")[2]
-            yaw_delta = (yaw - self.prev_yaw + np.pi) % (2.0 * np.pi) - np.pi
-            angular_vel_w = np.array([0.0, 0.0, yaw_delta / dt], dtype=np.float32)
-
-        linear_vel_b = rot_wb.inv().apply(linear_vel_w).astype(np.float32)
-        angular_vel_b = rot_wb.inv().apply(angular_vel_w).astype(np.float32)
-        projected_gravity_b = rot_wb.inv().apply(np.array([0.0, 0.0, -1.0])).astype(np.float32)
-
-        self.prev_time = timestamp
-        self.prev_pos_w = robot_pos_w.copy()
-        self.prev_yaw = rot_wb.as_euler("xyz")[2]
-
-        return SruRobotState(
-            linear_vel_b=linear_vel_b,
-            angular_vel_b=angular_vel_b,
-            projected_gravity_b=projected_gravity_b,
-            robot_pos_w=robot_pos_w,
-            robot_quat_wxyz=robot_quat_wxyz,
-        )
+ZED_MINI_CROP_WIDTH = 1728
+ZED_MINI_CROP_HEIGHT = 1080
+ENCODER_INPUT_WIDTH = 64
+ENCODER_INPUT_HEIGHT = 40
 
 
 class SruNavAdapter:
@@ -89,6 +45,7 @@ class SruNavAdapter:
         self.last_action = np.zeros(3, dtype=np.float32)
         self.h_state = np.zeros((1, 1, LSTM_HIDDEN_DIM), dtype=np.float32)
         self.c_state = np.zeros((1, 1, LSTM_HIDDEN_DIM), dtype=np.float32)
+        self.last_depth_preprocess_info: Dict[str, np.ndarray] = {}
 
         self._check_model_path(self.encoder_path)
         self._check_model_path(self.policy_path)
@@ -182,6 +139,15 @@ class SruNavAdapter:
             "dt": np.array([-1.0 if dt is None else dt], dtype=np.float64),
             "depth_shape": np.array(depth_img.shape, dtype=np.int32),
             "depth_minmax": np.array([np.nanmin(depth_img), np.nanmax(depth_img)], dtype=np.float32),
+            "depth_crop_shape": self.last_depth_preprocess_info.get(
+                "crop_shape", np.array([-1, -1], dtype=np.int32)
+            ),
+            "depth_processed_shape": self.last_depth_preprocess_info.get(
+                "processed_shape", np.array([-1, -1, -1, -1], dtype=np.int32)
+            ),
+            "depth_processed_minmax": self.last_depth_preprocess_info.get(
+                "processed_minmax", np.array([np.nan, np.nan], dtype=np.float32)
+            ),
             "depth_feature_shape": np.array(depth_feature.shape, dtype=np.int32),
             "linear_vel_b": state.linear_vel_b.astype(np.float32),
             "angular_vel_b": state.angular_vel_b.astype(np.float32),
@@ -232,8 +198,6 @@ class SruNavAdapter:
         else:
             final_cmd = np.zeros(3, dtype=np.float32)
 
-        if zero_reason is not None:
-            final_cmd = np.zeros(3, dtype=np.float32)
 
         above_walk_threshold = bool(final_cmd[0] > walk_threshold)
         should_send = zero_reason is None
@@ -254,12 +218,36 @@ class SruNavAdapter:
         depth = np.nan_to_num(depth, nan=0.0, posinf=self.max_depth * 2.0, neginf=0.0)
         depth[depth > self.max_depth] = 0.0
         depth[depth < self.min_depth] = 0.0
-        depth_resized = cv2.resize(depth, (64, 40), interpolation=cv2.INTER_LINEAR)
+        depth = self._center_crop_depth(depth, ZED_MINI_CROP_WIDTH, ZED_MINI_CROP_HEIGHT)
+        depth_resized = cv2.resize(
+            depth,
+            (ENCODER_INPUT_WIDTH, ENCODER_INPUT_HEIGHT),
+            interpolation=cv2.INTER_LINEAR,
+        )
         depth_tensor = depth_resized[np.newaxis, np.newaxis, :, :].astype(np.float32)
+        self.last_depth_preprocess_info = {
+            "crop_shape": np.array(depth.shape, dtype=np.int32),
+            "processed_shape": np.array(depth_tensor.shape, dtype=np.int32),
+            "processed_minmax": np.array(
+                [np.nanmin(depth_resized), np.nanmax(depth_resized)],
+                dtype=np.float32,
+            ),
+        }
         vae_output = self.encoder_session.run(
             [self.encoder_output_name], {self.encoder_input_name: depth_tensor}
         )[0]
         return vae_output.flatten().astype(np.float32)
+
+    def _center_crop_depth(self, depth: np.ndarray, target_width: int, target_height: int) -> np.ndarray:
+        height, width = depth.shape[:2]
+        if width < target_width or height < target_height:
+            raise ValueError(
+                "Depth image is smaller than the strict ZED Mini crop: "
+                f"got {width}x{height}, need at least {target_width}x{target_height}"
+            )
+        x0 = (width - target_width) // 2
+        y0 = (height - target_height) // 2
+        return depth[y0 : y0 + target_height, x0 : x0 + target_width]
 
     def build_target_position(
         self,
@@ -291,12 +279,17 @@ class SruNavAdapter:
         dt_text = "first" if dt < 0 else f"{dt:.3f}s"
         print(
             "[SRU DRY] tick={:.3f} dt={} depth shape={} min/max={:.3f}/{:.3f} "
+            "crop shape={} processed shape={} processed min/max={:.3f}/{:.3f} "
             "depth_feature shape={} obs shape={}".format(
                 diag["timestamp"][0],
                 dt_text,
                 tuple(diag["depth_shape"].tolist()),
                 diag["depth_minmax"][0],
                 diag["depth_minmax"][1],
+                tuple(diag["depth_crop_shape"].tolist()),
+                tuple(diag["depth_processed_shape"].tolist()),
+                diag["depth_processed_minmax"][0],
+                diag["depth_processed_minmax"][1],
                 tuple(diag["depth_feature_shape"].tolist()),
                 tuple(diag["obs_shape"].tolist()),
             )

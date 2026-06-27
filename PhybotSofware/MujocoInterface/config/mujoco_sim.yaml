@@ -39,3 +39,10 @@ gyroSensorName: baselink-gyro
 accSensorName: baselink-baseAcc
 
 metorvel_noise_std: 0
+
+# Fallback robot-side MuJoCo spawn. Robot-side first reads
+# ../NavSide/config/nav_molmospaces_procthor.yaml sim.spawn_w/sim.spawn_yaw.
+# These values are only used if that NavSide config is unavailable.
+spawn_w: [15, 6.5, 0.695]
+spawn_yaw: 1.57079632679
+

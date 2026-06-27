@@ -1,0 +1,47 @@
+models:
+  encoder_path: ../asset/models/vae_encoder.onnx
+  policy_path: ../asset/models/nav_policy.onnx
+  # policy_path: ../asset/models/policy.onnx
+control:
+  dry_run_hz: 5.0
+  vx_max: 1
+  wz_max: 1.5
+  walk_threshold: 0.3
+  goal_pos_tolerance: 0.15
+
+depth:
+  min_depth: 0.10
+  max_depth: 10.0
+
+goal:
+  # ProcTHOR val_0 spans roughly x=[0, 17], y=[2, 11] after x/z -> x/y mapping.
+  # Start is [11.5, 6.5, 0.695], so this goal is several meters away.
+  default_goal_w: [2.5, 3, 0.0]
+
+logging:
+  verbose_sru: false
+  summary_hz: 1.0
+
+sim:
+  # SRU robot merged with MolmoSpaces ProcTHOR-10k val_0.
+  mujoco_xml_path: ../asset/merged/phybot_molmospaces_procthor_val0.xml
+  camera_name: head_camera
+  # Runtime spawn override. Edit this instead of regenerating XML when the
+  # robot starts outside a room or intersects objects.
+  spawn_w: [15, 6.5, 0.695]
+  spawn_yaw: 1.57079632679
+  # Set true only when you want NavSide viewer to keep this spawn even if
+  # robot-side UDP state packets are being received.
+  ignore_udp_state: false
+  # Strict ZED Mini reproduction: render real capture mode first, then center
+  # crop to 1728x1080 and resize to the SRU 64x40 encoder input.
+  render_width: 1920
+  render_height: 1200
+  render_fps: 30.0
+  display_scale: 0.5
+
+udp:
+  local_ip: 127.0.0.1
+  local_port: 8081
+  remote_ip: 127.0.0.1
+  remote_port: 8080
