@@ -96,6 +96,12 @@ rl_deploy_cpg::rl_deploy_cpg()
     CPGInit(4, 0.02, float(1.0 / 0.8));
     CPGReset(true);
 
+    sim_tor = Eigen::VectorXd::Zero(num_of_dofs);
+    sim_tor_p = Eigen::VectorXd::Zero(num_of_dofs);
+    sim_tor_d = Eigen::VectorXd::Zero(num_of_dofs);
+    foutData.open("./c2_policy_sim_walk.txt", std::ios::out);
+    dataL = Eigen::VectorXd::Zero(600);
+
     ///////////////
     global_x = 0.0;
     global_y = 0.0;
@@ -196,6 +202,7 @@ void rl_deploy_cpg::GetDataFromPackage(DataPackage &DataPackage){
     gravity_vec_eigen = Euler_ZYXToGravityVec(DataPackage.imu_zyx);
     q_origin = DataPackage.motor_pos;
     dot_q_origin = DataPackage.motor_vel;
+    tor_origin = DataPackage.motor_torque;
     control_mode =DataPackage.control_mode;
     if (control_mode == 0){
         js_vx_desire = DataPackage.js_vx_desire;
@@ -211,18 +218,31 @@ void rl_deploy_cpg::SetDataToPackage(DataPackage &data)
 
     data.torq_desire.setZero() ;
 
-    
+    data.motor_Vel_desire.setZero();
+
     for(int i =0; i<num_of_dofs; i++)
     {
-        data.motor_Pos_desire(i) = outputdata_eigen[i] * action_scale[i] + default_dof_pos_eigen[i];
+        double a = outputdata_eigen(i);
+        data.motor_Pos_desire(i) = a * action_scale(i) + default_dof_pos_eigen[i];
+        sim_tor[i] = rl_p[i] *(data.motor_Pos_desire[i] - q_origin[i]) + rl_d[i]* (0 - dot_q_origin[i]);
+        sim_tor_p[i] = rl_p[i] *(data.motor_Pos_desire[i] - q_origin[i]);
+        sim_tor_d[i] = rl_d[i]* (0 - dot_q_origin[i]);
     }
 
-    
-    data.motor_Vel_desire.setZero();
     data.motor_Torque_desire.setZero();
 
     data.sim_P = rl_p*1.0;
     data.sim_D = rl_d*1.0;
+
+    dataL[0] = 0;
+    dataL.block(1, 0, 21, 1) = q_origin;
+    dataL.block(22, 0, 21, 1) = dot_q_origin;
+    dataL.block(43, 0, 21, 1) = outputdata_eigen;
+    dataL.block(64, 0, 21, 1) = tor_origin;
+    dataL.block(85, 0, 21, 1) = sim_tor;
+    dataL.block(106, 0, 21, 1) = sim_tor_p;
+    dataL.block(127, 0, 21, 1) = sim_tor_d;
+    dataLog(dataL, foutData);
 }
 
 
@@ -408,9 +428,6 @@ void rl_deploy_cpg::Step(DataPackage &data)
 
     if(step_num % decimation == 0)
     {   
-        CPGHopfOscillator();
-        UpdateGaitGeneratorPattern(commands);
-
         // 获取当前时间点
         auto now = std::chrono::system_clock::now();
         // 转换为自 1970-01-01 以来的秒数 (double 类型)
@@ -428,21 +445,16 @@ void rl_deploy_cpg::Step(DataPackage &data)
         commands(1) = js_vy_desire * lin_vel_scale;
         commands(2) = js_OmegaZ_desire * ang_vel_scale;
 
-        inputdata_eigen.segment(0, 3) = imu_angular_vel * ang_vel_scale * 0;
-        inputdata_eigen.segment(3, 3) =  imu_angular_vel * ang_vel_scale ;     
-        inputdata_eigen.segment(6, 3) =  gravity_vec_eigen ;
-        inputdata_eigen.segment(9, 3) = commands;
-        inputdata_eigen.segment(12, 4) = CPGGetXNorm();
+        inputdata_eigen.segment(0, 3) =  imu_angular_vel * ang_vel_scale ;
+        inputdata_eigen.segment(3, 3) =  gravity_vec_eigen ;
+        inputdata_eigen.segment(6, 3) = commands;
+        inputdata_eigen(9) = (abs(commands(0)) < 0.3) ? 0.0 : 1.0;
 
-        inputdata_eigen.segment(16, 4) = CPGGetYNorm();
-
-        inputdata_eigen.segment(20, num_of_dofs) = (q_origin - default_dof_pos_eigen) * dof_pos_scale;
-        inputdata_eigen.segment(20 + num_of_dofs, num_of_dofs) = dot_q_origin * dof_vel_scale ;
-        inputdata_eigen.segment(20 + 2*num_of_dofs, num_of_dofs) = last_actions_eigen;
-
-
-        inputdata_eigen.segment(20 + 3 * num_of_dofs, 5 * num_of_dofs) = pos_hist_buf_eigen.tail(5 * num_of_dofs);
-        inputdata_eigen.segment(20 + 3 * num_of_dofs +  5 * num_of_dofs, 5 * num_of_dofs) = vel_hist_buf_eigen.tail(5 * num_of_dofs);
+        inputdata_eigen.segment(10, num_of_dofs) = (q_origin - default_dof_pos_eigen) * dof_pos_scale;
+        inputdata_eigen.segment(10 + num_of_dofs, num_of_dofs) = dot_q_origin * dof_vel_scale ;
+        inputdata_eigen.segment(10 + 2*num_of_dofs, num_of_dofs) = last_actions_eigen;
+        inputdata_eigen.segment(10 + 3 * num_of_dofs, 5 * num_of_dofs) = pos_hist_buf_eigen.tail(5 * num_of_dofs);
+        inputdata_eigen.segment(10 + 3 * num_of_dofs +  5 * num_of_dofs, 5 * num_of_dofs) = vel_hist_buf_eigen.tail(5 * num_of_dofs);
 
         
         std::vector<torch::jit::IValue> inputs;
@@ -475,7 +487,7 @@ void rl_deploy_cpg::Step(DataPackage &data)
         last_actions_eigen = outputdata_eigen;
 
         pos_hist_buf_eigen.head(pos_hist_buf_eigen.size() - num_of_dofs) = pos_hist_buf_eigen.tail(pos_hist_buf_eigen.size() - num_of_dofs);
-        pos_hist_buf_eigen.tail(num_of_dofs) = (q_origin - default_dof_pos_eigen) * dof_pos_scale;
+        pos_hist_buf_eigen.tail(num_of_dofs) = q_origin * dof_pos_scale;
         
         vel_hist_buf_eigen.head(vel_hist_buf_eigen.size() - num_of_dofs) = vel_hist_buf_eigen.tail(vel_hist_buf_eigen.size() - num_of_dofs);
         vel_hist_buf_eigen.tail(num_of_dofs) = dot_q_origin * dof_vel_scale;
@@ -684,22 +696,22 @@ void rl_deploy_cpg::CPGSetSn() {
 }
 
 void rl_deploy_cpg::CPGSetWP_1() {
-    CPGSetncy((1.25));
+    CPGSetncy((1.4286));
     CPGSetCy(Eigen::VectorXd::Ones(4) * cycle_r_max);
     CPGSetCou(Eigen::VectorXd::Ones(4) * coupling_change_rate_increase);
     CPGSetA(Eigen::VectorXd::Ones(4) * amplitude_change_rate_increase);
     CPGSetP(phase_offset_walk);
-    CPGSetC(Eigen::VectorXd::Ones(4) * 0.5);
+    CPGSetC(Eigen::VectorXd::Ones(4) * 0.57);
 
     
 }
 void rl_deploy_cpg::CPGSetWP_2() {
-    CPGSetncy((1.25));
+    CPGSetncy((1.4286));
     CPGSetCy(Eigen::VectorXd::Ones(4) * cycle_r_max);
     CPGSetCou(Eigen::VectorXd::Ones(4) * coupling_change_rate_increase);
     CPGSetA(Eigen::VectorXd::Ones(4) * amplitude_change_rate_increase);
     CPGSetP(phase_offset_walk);
-    CPGSetC(Eigen::VectorXd::Ones(4) * 0.4);
+    CPGSetC(Eigen::VectorXd::Ones(4) * 0.54);
 
     
 }
@@ -709,7 +721,7 @@ void rl_deploy_cpg::CPGSetWP_3() {
     CPGSetCou(Eigen::VectorXd::Ones(4) * coupling_change_rate_increase);
     CPGSetA(Eigen::VectorXd::Ones(4) * amplitude_change_rate_increase);
     CPGSetP(phase_offset_walk);
-    CPGSetC(Eigen::VectorXd::Ones(4) * 0.4);
+    CPGSetC(Eigen::VectorXd::Ones(4) * 0.51);
 
     
 }
@@ -719,17 +731,17 @@ void rl_deploy_cpg::CPGSetWP_4() {
     CPGSetCou(Eigen::VectorXd::Ones(4) * coupling_change_rate_increase);
     CPGSetA(Eigen::VectorXd::Ones(4) * amplitude_change_rate_increase);
     CPGSetP(phase_offset_walk);
-    CPGSetC(Eigen::VectorXd::Ones(4) * 0.3);
+    CPGSetC(Eigen::VectorXd::Ones(4) * 0.50);
 
     
 }
 void rl_deploy_cpg::CPGSetWP_5() {
-    CPGSetncy((1.4286));
+    CPGSetncy((1.667));
     CPGSetCy(Eigen::VectorXd::Ones(4) * cycle_r_max);
     CPGSetCou(Eigen::VectorXd::Ones(4) * coupling_change_rate_increase);
     CPGSetA(Eigen::VectorXd::Ones(4) * amplitude_change_rate_increase);
     CPGSetP(phase_offset_walk);
-    CPGSetC(Eigen::VectorXd::Ones(4) * 0.3);
+    CPGSetC(Eigen::VectorXd::Ones(4) * 0.35);
 
     
 }
@@ -744,7 +756,7 @@ void rl_deploy_cpg::CPGSetWP_6() {
     
 }
 void rl_deploy_cpg::CPGSetWP_7() {
-    CPGSetncy((1.667));
+    CPGSetncy((1.8182));
     CPGSetCy(Eigen::VectorXd::Ones(4) * cycle_r_max);
     CPGSetCou(Eigen::VectorXd::Ones(4) * coupling_change_rate_increase);
     CPGSetA(Eigen::VectorXd::Ones(4) * amplitude_change_rate_increase);
@@ -754,12 +766,12 @@ void rl_deploy_cpg::CPGSetWP_7() {
     
 }
 void rl_deploy_cpg::CPGSetWP_8() {
-    CPGSetncy((2));
+    CPGSetncy((1.8182));
     CPGSetCy(Eigen::VectorXd::Ones(4) * cycle_r_max);
     CPGSetCou(Eigen::VectorXd::Ones(4) * coupling_change_rate_increase);
     CPGSetA(Eigen::VectorXd::Ones(4) * amplitude_change_rate_increase);
     CPGSetP(phase_offset_walk);
-    CPGSetC(Eigen::VectorXd::Ones(4) * 0.3);
+    CPGSetC(Eigen::VectorXd::Ones(4) * 0.27);
 
     
 }
@@ -1006,6 +1018,14 @@ Eigen::MatrixXd rl_deploy_cpg::LoadMotionLib(const std::string& filename, bool s
     std::cout << "motion lib loaded !!!" << std::endl;
 
     return mat;
+}
+
+bool rl_deploy_cpg::dataLog(Eigen::VectorXd &v, std::ofstream &f) {
+    for (int i = 0; i < v.size(); i++) {
+        f << v[i] << " ";
+    }
+    f << std::endl;
+    return true;
 }
 
 void rl_deploy_cpg::VideoTask() 

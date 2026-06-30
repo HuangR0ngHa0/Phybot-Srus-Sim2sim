@@ -16,7 +16,7 @@ depth:
 goal:
   # ProcTHOR val_0 spans roughly x=[0, 17], y=[2, 11] after x/z -> x/y mapping.
   # Start is [11.5, 6.5, 0.695], so this goal is several meters away.
-  default_goal_w: [2.5, 3, 0.0]
+  default_goal_w: [5.0, 3, 0.0]
 
 logging:
   verbose_sru: false

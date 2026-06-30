@@ -89,6 +89,11 @@ private:
     Eigen::VectorXd q_origin;
     Eigen::VectorXd dot_q_origin;
 
+    Eigen::VectorXd tor_origin;
+    Eigen::VectorXd sim_tor;
+    Eigen::VectorXd sim_tor_p;
+    Eigen::VectorXd sim_tor_d;
+
     Eigen::VectorXd lin_vel;           
     Eigen::VectorXd imu_angular_vel;      
     Eigen::VectorXd commands;
@@ -241,6 +246,10 @@ private:
     Eigen::VectorXd CPGGetYNorm();
     void UpdateGaitGeneratorPattern(Eigen::VectorXd Commands);
     void CommandRefinement();
+
+    Eigen::VectorXd dataL;
+    std::ofstream foutData;
+    bool dataLog(Eigen::VectorXd &v, std::ofstream &f);
 
     /////////////////////////
     // UDP 相关变量
