@@ -16,6 +16,8 @@ project(phybot_software)
 message(STATUS "Project source directory: ${PROJECT_SOURCE_DIR}/..")
 add_compile_options(-Wno-return-type)
 
+find_package(CUDA REQUIRED)
+
 # # catkin 包信息
 # catkin_package(
 #   INCLUDE_DIRS include
@@ -35,25 +37,29 @@ add_compile_options(-Wno-return-type)
 # find_package(OpenGL REQUIRED)
 # include_directories(${OPENGL_INCLUDE_DIR})
 
-set(CMAKE_PREFIX_PATH "/opt/ros/noetic" ${PROJECT_SOURCE_DIR}/ThirdParty/libtorch/share/cmake/Torch)
-find_package(Torch REQUIRED)
 # find_package(yaml-cpp REQUIRED)
 
 include_directories(${PROJECT_SOURCE_DIR})
 include_directories(${PROJECT_SOURCE_DIR}/MujocoInterface/include/simulate)
 include_directories(${PROJECT_SOURCE_DIR}/ThirdParty)
 include_directories(${PROJECT_SOURCE_DIR}/ThirdParty/eigen3)
-include_directories(${PROJECT_SOURCE_DIR}/ThirdParty/libtorch/include)
 include_directories(${PROJECT_SOURCE_DIR}/ThirdParty/boost/include)
-include_directories(${PROJECT_SOURCE_DIR}/ThirdParty/yaml/include)
 include_directories(${PROJECT_SOURCE_DIR}/ThirdParty/spdlog/include)
+include_directories(${CUDA_INCLUDE_DIRS})
+include_directories(/usr/local/cuda/include)
+include_directories(${PROJECT_SOURCE_DIR}/ThirdParty/TensorRT/include)
 
 include_directories(${PROJECT_SOURCE_DIR}/Joystick/include)
 include_directories(${PROJECT_SOURCE_DIR}/MotorList/include)
 link_directories(${PROJECT_SOURCE_DIR}/ThirdParty/boost/lib)
+link_directories(${PROJECT_SOURCE_DIR}/ThirdParty/TensorRT/lib)
+link_directories(/usr/local/cuda/lib64)
 
-link_directories(${PROJECT_SOURCE_DIR}/ThirdParty/yaml/lib)
 link_directories(${PROJECT_SOURCE_DIR}/MotorList/lib)
+
+set(TENSORRT_CUDA_RUNTIME cudart)
+set(TENSORRT_INFER_LIBRARY nvinfer)
+set(TENSORRT_ONNX_PARSER_LIBRARY nvonnxparser)
 
 
 aux_source_directory(${PROJECT_SOURCE_DIR}/DataPackage/src dir_datapackage)
@@ -61,27 +67,10 @@ aux_source_directory(${PROJECT_SOURCE_DIR}/DataPackage/src dir_datapackage)
 
 # target_link_libraries(DataPackage pinocchio yaml-cpp)
 
-# ======================== [修改] OpenCV 和 Orbbec 配置 ========================
-# 1. 查找 OpenCV
-find_package(OpenCV REQUIRED)
-message(STATUS "OpenCV Found: ${OpenCV_VERSION}")
-
-# 2. Orbbec SDK 路径配置
-# 设置 SDK 根目录
-set(ORBBEC_SDK_DIR "${PROJECT_SOURCE_DIR}/ThirdParty/OrbbecSDK")
-
-# 添加头文件路径
-include_directories(${OpenCV_INCLUDE_DIRS})
-include_directories(${ORBBEC_SDK_DIR}/include)
-
-# 添加库文件路径 
-# (根据你的 ls 结果，库直接在 lib 下，没有 linux_x64)
-link_directories(${ORBBEC_SDK_DIR}/lib)
-# ============================================================================
-
-
-
 if(WHICH_ENV AND(WHICH_ENV STREQUAL "realrobot_mini"))
+    set(CMAKE_PREFIX_PATH "/opt/ros/noetic" ${PROJECT_SOURCE_DIR}/ThirdParty/libtorch/share/cmake/Torch)
+    find_package(Torch REQUIRED)
+    include_directories(${PROJECT_SOURCE_DIR}/ThirdParty/libtorch/include)
 
 
     include_directories(${PROJECT_SOURCE_DIR}/ThirdParty/yaml/include)
@@ -158,8 +147,6 @@ if(WHICH_ENV AND(WHICH_ENV STREQUAL "realrobot_mini"))
                             MotorDrive
                             # HARDWARE_TOP
                             # Main_Control_Board_Device
-                            ${OpenCV_LIBS} # 链接 OpenCV
-                            OrbbecSDK 
                             )
 
     add_executable(set_zero ${PROJECT_SOURCE_DIR}/RobotStart/realrobot/set_zero_mini.cpp
@@ -185,7 +172,6 @@ if(WHICH_ENV AND(WHICH_ENV STREQUAL "realrobot_mini"))
 elseif(WHICH_ENV AND(WHICH_ENV STREQUAL "mujoco_sim_mini"))
     include_directories(${PROJECT_SOURCE_DIR}/ThirdParty/mujoco)
     include_directories(${PROJECT_SOURCE_DIR}/ThirdParty/glfw)
-    include_directories(${PROJECT_SOURCE_DIR}/ThirdParty/yaml/include)
     include_directories(${PROJECT_SOURCE_DIR}/MujocoInterface/include)
     include_directories(${PROJECT_SOURCE_DIR}/ThirdParty/gl/include)
 
@@ -196,8 +182,9 @@ elseif(WHICH_ENV AND(WHICH_ENV STREQUAL "mujoco_sim_mini"))
     include_directories(${PROJECT_SOURCE_DIR}/LowPassFilter/include)
     include_directories(${PROJECT_SOURCE_DIR}/ZeroState/include)
     include_directories(${PROJECT_SOURCE_DIR}/RL_deploy_amp/include)
-    include_directories(${PROJECT_SOURCE_DIR}/RL_deploy_mimic/include)
     include_directories(${PROJECT_SOURCE_DIR}/RL_deploy_cpg/include)
+
+    add_compile_definitions(DISABLE_RL_MIMIC_FOR_MUJOCO)
 
 
     aux_source_directory(${PROJECT_SOURCE_DIR}/MujocoInterface/src dir_mujoco)
@@ -205,16 +192,17 @@ elseif(WHICH_ENV AND(WHICH_ENV STREQUAL "mujoco_sim_mini"))
     aux_source_directory(${PROJECT_SOURCE_DIR}/StateMachine/src dir_FSM)
     aux_source_directory(${PROJECT_SOURCE_DIR}/LowPassFilter/src dir_LPF)
     aux_source_directory(${PROJECT_SOURCE_DIR}/ZeroState/src dir_ZSM)
-    aux_source_directory(${PROJECT_SOURCE_DIR}/RL_deploy_amp/src dir_rl_amp)
-    aux_source_directory(${PROJECT_SOURCE_DIR}/RL_deploy_mimic/src dir_rl_mimic)
     aux_source_directory(${PROJECT_SOURCE_DIR}/RL_deploy_cpg/src dir_rl_cpg)
+
+    list(REMOVE_ITEM dir_FSM
+        ${PROJECT_SOURCE_DIR}/StateMachine/src/RL_mimic.cpp
+    )
 
 
     
     # message(STATUS "joystick: ${dir_js}")
 
     link_directories(${PROJECT_SOURCE_DIR}/ThirdParty/mujoco/lib)
-    link_directories(${PROJECT_SOURCE_DIR}/ThirdParty/glfw/lib)
 
     set(IMU_SOURCES
     # test.cpp
@@ -243,30 +231,32 @@ elseif(WHICH_ENV AND(WHICH_ENV STREQUAL "mujoco_sim_mini"))
                         ${dir_datapackage}
                         ${dir_LPF}
                         ${dir_ZSM}
-                        ${dir_rl_amp}
-                        ${dir_rl_mimic}
                         ${dir_rl_cpg}
                         )
     target_link_libraries(main  PUBLIC 
                             ${TORCH_LIBRARIES}
                             mujoco
-                            glfw3 
+                            glfw 
                             # Threads::Threads
                             pthread
 
                             yaml-cpp
+                            ${TENSORRT_CUDA_RUNTIME}
+                            ${TENSORRT_INFER_LIBRARY}
+                            ${TENSORRT_ONNX_PARSER_LIBRARY}
                             # tinysplinecxx 
 
                             # torch
-                            ${OpenCV_LIBS}
-
-                            OrbbecSDK
                             )
 
                             # target_link_libraries(${PROJECT} "${TORCH_LIBRARIES}")
                             # set_property(TARGET ${PROJECT} PROPERTY CXX_STANDARD 17)
     
 elseif(WHICH_ENV AND(WHICH_ENV STREQUAL "gazebo_sim"))
+    set(CMAKE_PREFIX_PATH "/opt/ros/noetic" ${PROJECT_SOURCE_DIR}/ThirdParty/libtorch/share/cmake/Torch)
+    find_package(Torch REQUIRED)
+    include_directories(${PROJECT_SOURCE_DIR}/ThirdParty/libtorch/include)
+
     ## 查找 ROS 依赖
     # set(phybot_msgs_DIR /home/kairan/Documents/phybot_ws/src/phybot_msgs)
     set(phybot_msgs_DIR "${PROJECT_SOURCE_DIR}/../../devel/share/phybot_msgs/cmake")
@@ -335,4 +325,3 @@ endif()
 
 
 # install(TARGETS DataPackage DESTINATION ${PROJECT_SOURCE_DIR}/lib)
-

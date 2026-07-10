@@ -2,16 +2,21 @@ import time
 import traceback
 from pathlib import Path
 
-import cv2
-import mujoco
-import mujoco.viewer
 import numpy as np
 import yaml
 
 from .runtime import NavSideApp
 from .bridge import NavStatePacketV2, RobotComm
-from .depth import get_camera_images, make_depth_viz, make_rgb_viz
+from .depth import get_camera_images
 from .state import SruRobotState
+
+try:
+    import mujoco
+    import mujoco.viewer
+except Exception as exc:  # pragma: no cover - runtime dependency check
+    raise RuntimeError(
+        "NavSide sim requires the MuJoCo Python binding in the active Python environment."
+    ) from exc
 
 
 VIEWER_ONLY_MARKER_GROUP = 5
@@ -193,15 +198,6 @@ def _validate_strict_zed_mini_render_size(render_width, render_height, config_pa
         )
 
 
-def _resize_viz_for_display(image, display_scale):
-    if image is None or abs(display_scale - 1.0) < 1e-6:
-        return image
-    height, width = image.shape[:2]
-    display_width = max(1, int(round(width * display_scale)))
-    display_height = max(1, int(round(height * display_scale)))
-    return cv2.resize(image, (display_width, display_height), interpolation=cv2.INTER_AREA)
-
-
 def run(args):
     config = _load_nav_config(args.config)
     sim_cfg = config.get("sim", {})
@@ -216,11 +212,6 @@ def run(args):
     render_height = int(sim_cfg.get("render_height", STRICT_ZED_MINI_RENDER_HEIGHT))
     render_width = int(sim_cfg.get("render_width", STRICT_ZED_MINI_RENDER_WIDTH))
     _validate_strict_zed_mini_render_size(render_width, render_height, args.config)
-    render_fps = float(sim_cfg.get("render_fps", 30.0))
-    render_interval = 1.0 / max(render_fps, 1e-6)
-    display_scale = float(sim_cfg.get("display_scale", 0.5))
-    if display_scale <= 0.0:
-        raise ValueError(f"sim.display_scale must be > 0, got {display_scale}")
     goal = _parse_goal(args.goal, goal_cfg.get("default_goal_w", [5.0, 1.0, 0.0]))
     spawn_pos = _parse_vec3(args.spawn, sim_cfg.get("spawn_w"), "spawn")
     spawn_yaw = args.spawn_yaw if args.spawn_yaw is not None else sim_cfg.get("spawn_yaw")
@@ -259,7 +250,7 @@ def run(args):
     print(f"[NavSide] MuJoCo XML: {xml_path}")
     print(
         f"[NavSide] camera={camera_name} size={render_width}x{render_height} "
-        f"display_scale={display_scale} goal={goal.tolist()}"
+        f"goal={goal.tolist()}"
     )
     print(
         "[NavSide] spawn={} spawn_yaw={} markers(spawn={}, goal={}) marker_group={}".format(
@@ -272,11 +263,8 @@ def run(args):
     )
     print(f"[NavSide] ignore_udp_state={ignore_udp_state}")
 
-    latest_rgb_viz = None
-    latest_depth_viz = None
     last_safe_cmd = np.zeros(3, dtype=np.float32)
     last_print_time = 0.0
-    last_render_time = 0.0
 
     try:
         with mujoco.viewer.launch_passive(model, data) as viewer:
@@ -329,8 +317,6 @@ def run(args):
                             last_safe_cmd = np.zeros(3, dtype=np.float32)
                             zero_reason = "command_nan_or_inf"
 
-                        latest_rgb_viz = make_rgb_viz(rgb_img) if rgb_img is not None else latest_rgb_viz
-                        latest_depth_viz = make_depth_viz(depth_img) if depth_img is not None else latest_depth_viz
                     except Exception:
                         traceback.print_exc()
                         last_safe_cmd = np.zeros(3, dtype=np.float32)
@@ -353,15 +339,8 @@ def run(args):
                         )
                         last_print_time = now
 
-                if now - last_render_time >= render_interval:
-                    _enable_viewer_marker_group(viewer)
-                    viewer.sync()
-                    if latest_rgb_viz is not None:
-                        cv2.imshow("NavSide rgb", _resize_viz_for_display(latest_rgb_viz, display_scale))
-                    if latest_depth_viz is not None:
-                        cv2.imshow("NavSide depth", _resize_viz_for_display(latest_depth_viz, display_scale))
-                    cv2.waitKey(1)
-                    last_render_time = now
+                _enable_viewer_marker_group(viewer)
+                viewer.sync()
 
     except KeyboardInterrupt:
         print("[NavSide] interrupted by user.")
@@ -371,4 +350,3 @@ def run(args):
         except Exception:
             pass
         comm.stop()
-        cv2.destroyAllWindows()

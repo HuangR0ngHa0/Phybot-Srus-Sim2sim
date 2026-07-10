@@ -1,7 +1,7 @@
 models:
   encoder_path: ../asset/models/vae_encoder.onnx
-  policy_path: ../asset/models/nav_policy.onnx
-  # policy_path: ../asset/models/policy.onnx
+  # policy_path: ../asset/models/nav_policy.onnx
+  policy_path: ../asset/models/policy.onnx
 
 control:
   dry_run_hz: 5.0

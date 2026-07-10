@@ -1,7 +1,7 @@
 
 
 #include "DataPackage/include/DataPackage.h"
-#include <torch/script.h>
+#include "TensorRTInference.h"
 #include <fstream>
 #include <iomanip>
 #include <cstdint>
@@ -11,12 +11,6 @@
 #include <arpa/inet.h>
 #include <unistd.h>
 #include <fcntl.h>
-
-#include <opencv2/opencv.hpp>
-#include <libobsensor/ObSensor.hpp>
-#include <thread>
-#include <mutex>
-#include <atomic>
 
 struct CommandPacket {
     float vx;
@@ -67,13 +61,12 @@ public:
     void InitUDP();
     //处理通信（收发）
     void CommunicateWithPlanner(const DataPackage &data, double timestamp_sec);
-    /////////////////
-    void VideoTask(); // 视频线程主函数
 
 
 
 private:
-    torch::jit::script::Module policy;
+    TensorRTInference trt_infer;
+    bool use_tensorrt = false;
     Eigen::Vector3d gravity_vec_eigen;
     Eigen::VectorXd default_dof_pos_eigen;
     Eigen::VectorXd last_actions_eigen;
@@ -104,11 +97,6 @@ private:
     Eigen::VectorXd dof_vel;           
     Eigen::VectorXd last_actions;
     Eigen::VectorXd task_obs;
-
-    torch::Tensor torque_limits;
-    torch::Tensor commands_scale;
-    torch::Tensor default_dof_pos;
-    torch::Tensor output_dof_pos;
 
     int decimation;
     int num_proprio;
@@ -268,15 +256,4 @@ private:
     double nav_state_prev_timestamp = 0.0;
     Eigen::Vector3d nav_state_prev_pos = Eigen::Vector3d::Zero();
     //////////////////////////
-    // --- 视频传输相关 ---
-    std::thread video_thread;       // 视频线程
-    std::atomic<bool> video_running{false}; // 线程运行标志
-    int video_sockfd = -1;               // 视频专用的 UDP Socket
-    struct sockaddr_in video_dest_addr{}; // 视频发送的目标地址
-    // Orbbec SDK 相关
-    std::shared_ptr<ob::Pipeline> pipe;
-    std::shared_ptr<ob::Config> ob_config;
-    std::shared_ptr<ob::Align> align_filter; //过滤器
-    // 线程安全互斥锁 (保护 ip 地址)
-    std::mutex addr_mutex;
 };

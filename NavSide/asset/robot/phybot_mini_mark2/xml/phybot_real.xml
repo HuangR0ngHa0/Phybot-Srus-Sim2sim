@@ -72,7 +72,7 @@
 
     <!-- 人行道 -->
     <texture name="tex_sidewalk" type="2d" file="textures/sidewalk.png"/>
-    <material name="mat_sidewalk" texture="tex_sidewalk" texrepeat="2 2.5" reflectance="0"shininess="0" specular="0.1" texuniform="true"/>
+    <material name="mat_sidewalk" texture="tex_sidewalk" texrepeat="2 2.5" reflectance="0" shininess="0" specular="0.1" texuniform="true"/>
 
     <!--楼房侧面 -->
     <texture name="tex_building" type="2d" file="textures/building1.png"/>

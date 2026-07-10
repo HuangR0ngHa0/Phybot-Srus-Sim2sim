@@ -19,7 +19,6 @@ void RL_walk::run(Event event, DataPackage& data) {
     rl_walk->GetDataFromPackage(data);
     rl_walk->Step(data);
     rl_walk->SetDataToPackage(data);
-    // rl_walk->VideoTask();
 }
 
 void RL_walk::exit(Event event, DataPackage& data) {

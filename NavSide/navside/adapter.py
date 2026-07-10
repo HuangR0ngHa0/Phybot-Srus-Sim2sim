@@ -2,10 +2,10 @@ import os
 import time
 from typing import Dict, Optional
 
-import cv2
 import numpy as np
 from scipy.spatial.transform import Rotation as R
 
+from .image import resize_image
 from .state import SruRobotState
 
 
@@ -219,11 +219,7 @@ class SruNavAdapter:
         depth[depth > self.max_depth] = 0.0
         depth[depth < self.min_depth] = 0.0
         depth = self._center_crop_depth(depth, ZED_MINI_CROP_WIDTH, ZED_MINI_CROP_HEIGHT)
-        depth_resized = cv2.resize(
-            depth,
-            (ENCODER_INPUT_WIDTH, ENCODER_INPUT_HEIGHT),
-            interpolation=cv2.INTER_LINEAR,
-        )
+        depth_resized = resize_image(depth, ENCODER_INPUT_WIDTH, ENCODER_INPUT_HEIGHT)
         depth_tensor = depth_resized[np.newaxis, np.newaxis, :, :].astype(np.float32)
         self.last_depth_preprocess_info = {
             "crop_shape": np.array(depth.shape, dtype=np.int32),

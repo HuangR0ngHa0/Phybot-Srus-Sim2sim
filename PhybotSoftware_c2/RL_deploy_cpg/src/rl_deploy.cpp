@@ -1,30 +1,34 @@
 #include "RL_deploy_cpg/include/rl_deploy.h"
 // #include "RL_deploy_cpg/include/CPGControl.h"
 #include <cmath>  // 包含 sin、cos 等数学函数
+#include <unordered_set>
 
 #include <chrono>
 #include <iostream>
 #include <iomanip> // 用于控制打印精度
-
-
-#include <opencv2/opencv.hpp>
-#include <opencv2/imgcodecs.hpp> 
-#include <libobsensor/ObSensor.hpp>
-
-
 rl_deploy_cpg::rl_deploy_cpg()
 {
-    torch::autograd::GradMode::set_enabled(false);
     std::string file_path = "../RL_deploy_cpg/config/rl_params.yaml";
     YAML::Node config = YAML::LoadFile(file_path);
-    bool enable_video = false;
-    if (config["enable_video"]) {
-        enable_video = config["enable_video"].as<bool>();
+    if (config["policy_onnx_path"] && !config["policy_onnx_path"].as<std::string>().empty()) {
+        policy_path = config["policy_onnx_path"].as<std::string>();
+    } else if (config["policy_path"] && !config["policy_path"].as<std::string>().empty()) {
+        policy_path = config["policy_path"].as<std::string>();
+    } else {
+        policy_path.clear();
     }
-    // load the policy
-    policy_path = config["policy_path"].as<std::string>();
-    policy = torch::jit::load(policy_path, torch::kCPU);
-    std::cout << "valinia policy init complete" << std::endl;
+
+    if (policy_path.size() >= 5 && policy_path.substr(policy_path.size() - 5) == ".onnx") {
+        use_tensorrt = trt_infer.init(policy_path, false);
+        if (!use_tensorrt) {
+            std::cerr << "Failed to initialize TensorRT policy: " << policy_path << std::endl;
+        } else {
+            std::cout << "TensorRT policy init complete" << std::endl;
+        }
+    } else {
+        use_tensorrt = false;
+        std::cerr << "Only ONNX TensorRT policy is supported for RL_deploy_cpg. Please set policy_onnx_path to a .onnx model." << std::endl;
+    }
 
 
     decimation = config["decimation"].as<int>();
@@ -83,11 +87,6 @@ rl_deploy_cpg::rl_deploy_cpg()
     dof_vel = Eigen::VectorXd::Zero(num_of_dofs);
     last_actions = Eigen::VectorXd::Zero(num_of_dofs);
 
-    torque_limits = torch::tensor(ReadVectorFromYaml<double>(config["torque_limits"])).view({1, -1});
-    default_dof_pos = torch::tensor(ReadVectorFromYaml<double>(config["default_dof_pos"])).view({1, -1});
-
-    commands_scale = torch::tensor({lin_vel_scale, lin_vel_scale, ang_vel_scale});
-    output_dof_pos = torch::zeros({1, num_of_dofs});
     inputdata_eigen = Eigen::VectorXd::Zero(num_observations);
 
     num_observations = num_proprio + num_of_dofs * 5 *2  ;
@@ -108,91 +107,12 @@ rl_deploy_cpg::rl_deploy_cpg()
     global_yaw = 0.0;
     //初始化 UDP
     InitUDP();
-    ///////////////
-    if (enable_video) {
-        // =============== 新增：初始化视频 UDP Socket ===============
-        if ((video_sockfd = socket(AF_INET, SOCK_DGRAM, 0)) < 0) {
-            std::cerr << "Video Socket creation failed" << std::endl;
-        }
-        // 视频 socket 不需要 bind，因为它只负责发送 (Send Only)
-        // =============== 初始化 Orbbec 相机 ===============
-        try {
-            // 创建 Pipeline，这是与相机交互的管道
-            pipe = std::make_shared<ob::Pipeline>();
-            ob_config = std::make_shared<ob::Config>();
-            // 配置彩色流 (RGB)
-            // 注意：根据你的相机型号，分辨率可能需要调整 (640x480 或 848x480)
-            auto profiles = pipe->getStreamProfileList(OB_SENSOR_COLOR);
-            std::shared_ptr<ob::VideoStreamProfile> colorProfile = nullptr;
-            try {
-                // 尝试查找 848x480 @ 30fps RGB 格式
-                colorProfile = profiles->getVideoStreamProfile(848, 480, OB_FORMAT_RGB, 30);
-            } catch(...) {
-                // 如果找不到，使用默认配置
-                colorProfile = std::const_pointer_cast<ob::VideoStreamProfile>(profiles->getProfile(OB_PROFILE_DEFAULT)->as<ob::VideoStreamProfile>());
-            }
-            ob_config->enableStream(colorProfile);
-
-            // 配置深度流 (Depth)
-            try {
-                auto depthProfiles = pipe->getStreamProfileList(OB_SENSOR_DEPTH);
-                std::shared_ptr<ob::VideoStreamProfile> depthProfile = nullptr;
-                try {
-                    // 尝试查找 848x480 @ 30fps Y16 格式 (对应你的 RGB 分辨率)
-                    // 如果报错，可以尝试改为 640x480
-                    depthProfile = depthProfiles->getVideoStreamProfile(848, 480, OB_FORMAT_Y16, 30);
-                } catch(...) {
-                    // 如果找不到指定分辨率，就用默认的
-                    depthProfile = std::const_pointer_cast<ob::VideoStreamProfile>(depthProfiles->getProfile(OB_PROFILE_DEFAULT)->as<ob::VideoStreamProfile>());
-                }
-                ob_config->enableStream(depthProfile);
-                std::cout << "Depth Stream Enabled!" << std::endl;
-            } catch(ob::Error &e) {
-                std::cerr << "Depth Init Failed: " << e.getMessage() << std::endl;
-            }
-            // ====================================================
-            // 启动相机
-            pipe->start(ob_config);
-            align_filter = std::make_shared<ob::Align>(OB_STREAM_COLOR);
-            std::cout << "Orbbec Camera Started Successfully!" << std::endl;
-            // =============== 启动视频发送线程 ===============
-            video_running = true;
-            video_thread = std::thread(&rl_deploy_cpg::VideoTask, this);
-        } catch(ob::Error &e) {
-            std::cerr << "Orbbec Init Failed: " << e.getMessage() << std::endl;
-            video_running = false;
-        } catch(...) {
-            std::cerr << "Camera Init Failed (Unknown Error)" << std::endl;
-            video_running = false;
-        }
-        // ========================================================
-    } else {
-        video_running = false;
-    }
-
-
 }
 
 
 // rl_deploy_cpg::~rl_deploy_cpg() {
 // }
 rl_deploy_cpg::~rl_deploy_cpg() {
-    // 停止视频线程
-    video_running = false;
-    if (video_thread.joinable()) {
-        video_thread.join();
-    }
-
-    // 停止相机
-    if (pipe) {
-        try {
-            pipe->stop();
-        } catch(...) {}
-    }
-    
-    if (video_sockfd > 0) {
-        close(video_sockfd);
-    }
 }
 
 
@@ -308,16 +228,6 @@ void rl_deploy_cpg::CommunicateWithPlanner(const DataPackage &data, double times
         if (n > 0) {
             received_new_data = true;
             python_addr = cliaddr; 
-            
-            // std::cout << "Received Cmd from Python! Update Video Target." << std::endl;
-            // =============== 更新视频发送的目标地址 ===============
-            // 这是一个简单的锁，防止多线程竞争
-            {
-                std::lock_guard<std::mutex> lock(addr_mutex);
-                video_dest_addr = cliaddr;
-                video_dest_addr.sin_port = htons(8082); // [重要] 视频发送到 Python 的 8082 端口
-            }
-            // ==========================================================
 
             // [核心] 更新 CPG/RL 需要的期望速度
             if (control_mode != 0) {
@@ -457,29 +367,30 @@ void rl_deploy_cpg::Step(DataPackage &data)
         inputdata_eigen.segment(10 + 3 * num_of_dofs +  5 * num_of_dofs, 5 * num_of_dofs) = vel_hist_buf_eigen.tail(5 * num_of_dofs);
 
         
-        std::vector<torch::jit::IValue> inputs;
-        torch::Tensor inputdata_tensor = torch::zeros({num_observations}).toType(torch::kFloat);
-
-        auto input_accessor = inputdata_tensor.accessor<float, 1>();
+        std::vector<float> input_vector(num_observations);
         for (int i = 0; i < num_observations; i++) {
-            input_accessor[i] = static_cast<float>(inputdata_eigen(i));
-        }
-        inputdata_tensor = inputdata_tensor.to(torch::kCPU);
-        inputdata_tensor = inputdata_tensor.unsqueeze(0);
-        inputs.push_back(inputdata_tensor);
-
-        
-        torch::Tensor output_tensor;
-
-        output_tensor = policy.forward(inputs).toTensor();
-
-        if (output_tensor.dim() > 1 && output_tensor.size(0) == 1){
-            output_tensor = output_tensor.squeeze(0);
+            input_vector[i] = static_cast<float>(inputdata_eigen(i));
         }
 
-        auto accessor = output_tensor.accessor<float, 1>();
+        std::vector<float> output_vector;
+        if (!use_tensorrt || !trt_infer.infer(input_vector, output_vector)) {
+            std::cerr << "TensorRT inference failed" << std::endl;
+            output_vector.assign(num_of_dofs, 0.0f);
+        }
+
+        if (static_cast<int>(output_vector.size()) != num_of_dofs) {
+            std::cerr << "Unexpected TensorRT output size: "
+                      << output_vector.size()
+                      << " expected "
+                      << num_of_dofs
+                      << std::endl;
+        }
+
         for (int i = 0; i < num_of_dofs; i++) {
-            outputdata_eigen(i) = static_cast<double>(accessor[i]);
+            outputdata_eigen(i) =
+                (i < static_cast<int>(output_vector.size()))
+                ? static_cast<double>(output_vector[i])
+                : 0.0;
         }
         
 
@@ -945,9 +856,6 @@ void rl_deploy_cpg::LogTaskObs() {
     }
 
     try {
-        // Convert tensor to CPU and double precision for logging
-        // torch::Tensor task_obs_cpu = task_obs_tensor.to(torch::kCPU).to(torch::kDouble);
-
         // Write step info
         // task_obs_log_file << step_num << "," << frame_count << "," << control_mode;
 
@@ -1026,130 +934,4 @@ bool rl_deploy_cpg::dataLog(Eigen::VectorXd &v, std::ofstream &f) {
     }
     f << std::endl;
     return true;
-}
-
-void rl_deploy_cpg::VideoTask() 
-{
-    std::cout << "Video Thread Started (Aligned RGB-D)." << std::endl;
-    
-    // ------------------- 1. 压缩参数配置 -------------------
-    // RGB 使用 JPEG, 质量 50 (平衡画质与带宽)
-    std::vector<int> rgb_params;
-    rgb_params.push_back(cv::IMWRITE_JPEG_QUALITY);
-    rgb_params.push_back(30); 
-
-    // Depth 使用 PNG (无损), 压缩级别 1 (追求速度)
-    std::vector<int> depth_params;
-    depth_params.push_back(cv::IMWRITE_PNG_COMPRESSION);
-    depth_params.push_back(1); 
-
-    long frame_count = 0;
-    while (video_running) 
-    {
-        // ------------------- 2. 检查目标 IP -------------------
-        bool has_target = false;
-        struct sockaddr_in target_addr_base;
-        {
-            std::lock_guard<std::mutex> lock(addr_mutex);
-            if (video_dest_addr.sin_family != 0) {
-                target_addr_base = video_dest_addr;
-                has_target = true;
-            }
-        }
-
-        if (!has_target) {
-            std::this_thread::sleep_for(std::chrono::milliseconds(100));
-            continue; 
-        }
-
-        // ------------------- 3. 获取并对齐帧 -------------------
-        auto frameSet = pipe->waitForFrames(100);
-        if (frameSet == nullptr) continue;
-
-        frame_count ++ ;
-        if (frame_count % 30 != 0)continue;
-        // 【关键】执行 D2C 对齐：将深度图对齐到彩色图
-        // process 方法会返回一个新的 frameSet，其中的 Depth 已经被变换
-        if (frameSet->colorFrame() && frameSet->depthFrame()) {
-            try {
-                auto alignedFrame = align_filter->process(frameSet);
-                // frameSet = align_filter->process(frameSet);
-                frameSet = alignedFrame->as<ob::FrameSet>();
-            } catch (ob::Error &e) {
-                std::cerr << "Align Error: " << e.getMessage() << std::endl;
-                continue;
-            }
-        } else {
-            continue; // 缺帧则跳过
-        }
-
-        // ------------------- 4. 处理 RGB (端口 8082) -------------------
-        auto colorFrame = frameSet->colorFrame();
-        if (colorFrame != nullptr) {
-            // Orbbec SDK 默认 RGB -> OpenCV BGR
-            cv::Mat frame(colorFrame->height(), colorFrame->width(), CV_8UC3, colorFrame->data());
-            cv::Mat bgr_frame;
-            cv::cvtColor(frame, bgr_frame, cv::COLOR_RGB2BGR);
-            std::vector<uchar> buffer;
-            cv::imencode(".jpg", bgr_frame, buffer, rgb_params);
-
-            // UDP 发送限制判断
-            if (buffer.size() < 60000) {
-                struct sockaddr_in rgb_addr = target_addr_base;
-                rgb_addr.sin_port = htons(8082); 
-                // sendto(video_sockfd, buffer.data(), buffer.size(), 0,
-                //        (const struct sockaddr *)&rgb_addr, sizeof(rgb_addr));
-                int sent_bytes = sendto(video_sockfd, buffer.data(), buffer.size(), 0,
-                   (const struct sockaddr *)&rgb_addr, sizeof(rgb_addr));
-                if (sent_bytes < 0) {
-                    // perror("RGB Sendto Failed"); // 如果发送失败，打印系统错误原因
-                }
-            }
-        }
-
-        // ------------------- 5. 处理 Depth (端口 8083) -------------------
-        auto depthFrame = frameSet->depthFrame();
-        if (depthFrame != nullptr) {
-            // 对齐后，depth 分辨率 = color 分辨率 (例如 848x480)
-            cv::Mat depthMat(depthFrame->height(), depthFrame->width(), CV_16UC1, depthFrame->data());
-
-            for(int r = 0; r < depthMat.rows; r++){
-                uint16_t* ptr = depthMat.ptr<uint16_t>(r);
-                for(int c =0;c<depthMat.cols;c++){
-                    if(ptr[c]>0){
-                        ptr[c]=ptr[c] & 0xFFF0;
-                    }
-                    if(ptr[c] > 6000){
-                        ptr[c] = 6000;
-                    }
-                }
-            }
-
-            // cv::Mat depthFiltered;
-            // cv::threshold(depthMat, depthFiltered,8000,0, cv::THRESH_TOZERO_INV);
-
-            // for(int r = 0; r < depthFiltered.rows; r++){
-            //     uint16_t* ptr = depthFiltered.ptr<uint16_t>(r);
-            //     for(int c =0;c<depthFiltered.cols;c++){
-            //         if(ptr[c]>0){
-            //             ptr[c]=ptr[c] & 0xFFF0;
-            //         }
-            //     }
-            // }
-
-
-            cv::Mat depthSmall;
-            cv::resize(depthMat, depthSmall, cv::Size(), 0.6, 0.6, cv::INTER_NEAREST);
-
-            std::vector<uchar> depth_buffer;
-            cv::imencode(".png", depthSmall, depth_buffer, depth_params);
-
-            if (depth_buffer.size() < 600000) {
-                struct sockaddr_in depth_addr = target_addr_base;
-                depth_addr.sin_port = htons(8083);
-                sendto(video_sockfd, depth_buffer.data(), depth_buffer.size(), 0,
-                       (const struct sockaddr *)&depth_addr, sizeof(depth_addr));
-            }
-        }
-    }
 }

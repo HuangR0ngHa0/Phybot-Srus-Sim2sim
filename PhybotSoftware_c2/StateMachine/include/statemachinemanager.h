@@ -2,7 +2,9 @@
 
 #include "StateMachine/include/Zero.h"
 #include "StateMachine/include/RL_walk.h"
+#ifndef DISABLE_RL_MIMIC_FOR_MUJOCO
 #include "StateMachine/include/RL_mimic.h"
+#endif
 
 class StateMachineManager {
 public:
@@ -22,12 +24,16 @@ public:
 
         auto ZeroHandler = std::make_shared<Zero>();
         auto RL_walk_Handler = std::make_shared<RL_walk>();
+#ifndef DISABLE_RL_MIMIC_FOR_MUJOCO
         auto RL_mimic_Handler = std::make_shared<RL_mimic>();
+#endif
 
 
         registerHandler(State::ZERO, ZeroHandler);
         registerHandler(State::RL_walk, RL_walk_Handler);
+#ifndef DISABLE_RL_MIMIC_FOR_MUJOCO
         registerHandler(State::RL_mimic, RL_mimic_Handler);
+#endif
 
     }
 
@@ -55,7 +61,9 @@ public:
 
         handleEvent(State::ZERO, Event::START, data);  // 自动触发 start 事件
         handleEvent(State::RL_walk, Event::START, data);  // 自动触发 start 事件
+#ifndef DISABLE_RL_MIMIC_FOR_MUJOCO
         handleEvent(State::RL_mimic, Event::START, data);  // 自动触发 start 事件
+#endif
 
     }
 

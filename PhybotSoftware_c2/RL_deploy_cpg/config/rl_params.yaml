@@ -1,5 +1,5 @@
-policy_path: ../RL_deploy_cpg/model/alt/0513_1650_7000cpg_policy.pt
-# policy_path: ../RL_deploy_cpg/model/alt/old/cpg_policy.pt
+# policy_path: ../RL_deploy_cpg/model/alt/0513_1650_7000cpg_policy.pt
+policy_onnx_path: ../RL_deploy_cpg/model/phybot_cpg_policy.onnx
 
 decimation: 10
 num_proprio: 73
@@ -51,4 +51,3 @@ useless_joint_id: []
 # Logging configuration
 enable_task_obs_logging: true
 task_obs_log_path: "../RL_deploy_cpg/logs/log_data.csv"
-enable_video: false

@@ -1,5 +1,6 @@
-import cv2
 import numpy as np
+
+from .image import depth_to_rgb_uint8, rgb_to_uint8
 
 
 def get_camera_images(renderer, data, cam_id, hidden_geom_groups=()):
@@ -31,9 +32,7 @@ def make_rgb_viz(rgb_img: np.ndarray) -> np.ndarray:
     rgb = np.asarray(rgb_img)
     if rgb.size == 0:
         return np.zeros((1, 1, 3), dtype=np.uint8)
-    if rgb.dtype != np.uint8:
-        rgb = np.clip(rgb, 0, 255).astype(np.uint8)
-    return cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR)
+    return rgb_to_uint8(rgb)
 
 
 def make_depth_viz(depth_img: np.ndarray) -> np.ndarray:
@@ -41,12 +40,4 @@ def make_depth_viz(depth_img: np.ndarray) -> np.ndarray:
     finite = np.isfinite(depth)
     if not np.any(finite):
         return np.zeros((depth.shape[0], depth.shape[1], 3), dtype=np.uint8)
-    valid = depth[finite]
-    dmin = float(valid.min())
-    dmax = float(valid.max())
-    if abs(dmax - dmin) < 1e-6:
-        norm = np.zeros_like(depth, dtype=np.uint8)
-    else:
-        norm = np.clip((depth - dmin) / (dmax - dmin), 0.0, 1.0)
-        norm = (norm * 255.0).astype(np.uint8)
-    return cv2.applyColorMap(norm, cv2.COLORMAP_TURBO)
+    return depth_to_rgb_uint8(depth)
