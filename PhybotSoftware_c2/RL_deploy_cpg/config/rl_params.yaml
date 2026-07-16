@@ -1,7 +1,7 @@
 # policy_path: ../RL_deploy_cpg/model/alt/0513_1650_7000cpg_policy.pt
 policy_onnx_path: ../RL_deploy_cpg/model/phybot_cpg_policy.onnx
 
-decimation: 10
+decimation: 6
 num_proprio: 73
 
 clip_obs: 50.0

@@ -1,11 +1,70 @@
 #include "RL_deploy_cpg/include/rl_deploy.h"
 // #include "RL_deploy_cpg/include/CPGControl.h"
 #include <cmath>  // 包含 sin、cos 等数学函数
+#include <algorithm>
+#include <cstddef>
+#include <sstream>
 #include <unordered_set>
+#include <cstdlib>
 
 #include <chrono>
 #include <iostream>
 #include <iomanip> // 用于控制打印精度
+
+namespace {
+
+bool robotside_timing_enabled() {
+    const char* robotside_flag = std::getenv("ROBOTSIDE_TIMING");
+    if (robotside_flag != nullptr && robotside_flag[0] == '1' && robotside_flag[1] == '\0') {
+        return true;
+    }
+    const char* sru_flag = std::getenv("SRU_TIMING");
+    return sru_flag != nullptr && sru_flag[0] == '1' && sru_flag[1] == '\0';
+}
+
+class RateMeter {
+public:
+    explicit RateMeter(const char* name, double report_interval_sec = 2.0)
+        : name_(name),
+          report_interval_sec_(report_interval_sec),
+          enabled_(robotside_timing_enabled()),
+          last_report_(std::chrono::steady_clock::now()) {}
+
+    void tick() {
+        if (!enabled_) {
+            return;
+        }
+        ++count_;
+        const auto now = std::chrono::steady_clock::now();
+        const std::chrono::duration<double> elapsed = now - last_report_;
+        if (elapsed.count() < report_interval_sec_) {
+            return;
+        }
+        const double hz = static_cast<double>(count_) / std::max(elapsed.count(), 1e-9);
+        std::ostringstream oss;
+        oss << "[RobotSide PERF] " << name_ << ": "
+            << std::fixed << std::setprecision(1) << hz
+            << " Hz over " << std::setprecision(2) << elapsed.count() << "s";
+        std::cout << oss.str() << std::endl;
+        count_ = 0;
+        last_report_ = now;
+    }
+
+private:
+    const char* name_;
+    double report_interval_sec_;
+    bool enabled_;
+    std::size_t count_ = 0;
+    std::chrono::steady_clock::time_point last_report_;
+};
+
+RateMeter& cpg_policy_rate_meter() {
+    static RateMeter meter("cpg_trt_policy");
+    return meter;
+}
+
+}  // namespace
+
 rl_deploy_cpg::rl_deploy_cpg()
 {
     std::string file_path = "../RL_deploy_cpg/config/rl_params.yaml";
@@ -373,9 +432,12 @@ void rl_deploy_cpg::Step(DataPackage &data)
         }
 
         std::vector<float> output_vector;
-        if (!use_tensorrt || !trt_infer.infer(input_vector, output_vector)) {
+        const bool infer_ok = use_tensorrt && trt_infer.infer(input_vector, output_vector);
+        if (!infer_ok) {
             std::cerr << "TensorRT inference failed" << std::endl;
             output_vector.assign(num_of_dofs, 0.0f);
+        } else {
+            cpg_policy_rate_meter().tick();
         }
 
         if (static_cast<int>(output_vector.size()) != num_of_dofs) {
