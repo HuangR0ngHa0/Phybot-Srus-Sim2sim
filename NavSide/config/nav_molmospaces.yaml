@@ -1,6 +1,9 @@
 models:
-  encoder_path: ../asset/models/vae_encoder.onnx
-  policy_path: ../asset/models/nav_policy.onnx
+  inference_backend: tensorrt
+  encoder_engine_path: ../asset/models/vae_pretrain_new.plan
+  policy_engine_path: ../asset/models/policy_1.plan
+  encoder_path: ../asset/models/vae_pretrain_new.onnx
+  policy_path: ../asset/models/policy_1.onnx
 
 control:
   dry_run_hz: 8.0

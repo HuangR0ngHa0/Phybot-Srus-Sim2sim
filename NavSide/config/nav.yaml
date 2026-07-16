@@ -3,7 +3,6 @@ models:
   encoder_engine_path: ../asset/models/vae_pretrain_new.plan
   policy_engine_path: ../asset/models/policy_1.plan
   encoder_path: ../asset/models/vae_pretrain_new.onnx
-  # policy_path: ../asset/models/nav_policy.onnx
   policy_path: ../asset/models/policy_1.onnx
 
 control:
