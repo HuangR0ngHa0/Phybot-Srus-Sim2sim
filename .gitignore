@@ -1,5 +1,9 @@
 **/__pycache__/
 **/*.pyc
+NavSide/cpp_trt/build/
+PhybotSoftware_c2/**/build/
+PhybotSoftware_c2/**/logs/
+NavSide/**/*.log
 **/.pytest_cache/
 **/.mypy_cache/
 **/.venv/
