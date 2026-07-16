@@ -68,18 +68,11 @@ aux_source_directory(${PROJECT_SOURCE_DIR}/DataPackage/src dir_datapackage)
 # target_link_libraries(DataPackage pinocchio yaml-cpp)
 
 if(WHICH_ENV AND(WHICH_ENV STREQUAL "realrobot_mini"))
-    set(CMAKE_PREFIX_PATH "/opt/ros/noetic" ${PROJECT_SOURCE_DIR}/ThirdParty/libtorch/share/cmake/Torch)
-    find_package(Torch REQUIRED)
-    include_directories(${PROJECT_SOURCE_DIR}/ThirdParty/libtorch/include)
-
-
     include_directories(${PROJECT_SOURCE_DIR}/ThirdParty/yaml/include)
     include_directories(${PROJECT_SOURCE_DIR}/MujocoInterface/include)
     include_directories(${PROJECT_SOURCE_DIR}/device/Imu_hipnuc/linux)
     include_directories(${PROJECT_SOURCE_DIR}/device/Imu_hipnuc/linux/fw_downloader)
     include_directories(${PROJECT_SOURCE_DIR}/device/Imu_hipnuc/lib)
-    include_directories(${PROJECT_SOURCE_DIR}/RL_deploy_amp/include)
-    include_directories(${PROJECT_SOURCE_DIR}/RL_deploy_mimic/include)
     include_directories(${PROJECT_SOURCE_DIR}/RL_deploy_cpg/include)
 
 
@@ -87,23 +80,17 @@ if(WHICH_ENV AND(WHICH_ENV STREQUAL "realrobot_mini"))
     include_directories(${PROJECT_SOURCE_DIR}/StateMachine/include)
     include_directories(${PROJECT_SOURCE_DIR}/MotorList/include)
     include_directories(${PROJECT_SOURCE_DIR}/LowPassFilter/include)
-    include_directories(${PROJECT_SOURCE_DIR}/Mocap/include)
     include_directories(${PROJECT_SOURCE_DIR}/ZeroState/include)
 
     aux_source_directory(${PROJECT_SOURCE_DIR}/Joystick/src dir_js)
     aux_source_directory(${PROJECT_SOURCE_DIR}/StateMachine/src dir_FSM)
     aux_source_directory(${PROJECT_SOURCE_DIR}/MotorList/src dir_ML)
     aux_source_directory(${PROJECT_SOURCE_DIR}/LowPassFilter/src dir_LPF)
-    aux_source_directory(${PROJECT_SOURCE_DIR}/Mocap/src dir_mocap)
     aux_source_directory(${PROJECT_SOURCE_DIR}/ZeroState/src dir_ZSM)
-    aux_source_directory(${PROJECT_SOURCE_DIR}/RL_deploy_amp/src dir_rl_amp)
-    aux_source_directory(${PROJECT_SOURCE_DIR}/RL_deploy_mimic/src dir_rl_mimic)
     aux_source_directory(${PROJECT_SOURCE_DIR}/RL_deploy_cpg/src dir_rl_cpg)
-
 
     link_directories(${PROJECT_SOURCE_DIR}/ThirdParty/yaml/lib)
     link_directories(${PROJECT_SOURCE_DIR}/MotorList/lib)
-    link_directories(${PROJECT_SOURCE_DIR}/Mocap/lib)
 
     set(IMU_SOURCES
     # test.cpp
@@ -130,21 +117,19 @@ if(WHICH_ENV AND(WHICH_ENV STREQUAL "realrobot_mini"))
                         ${IMU_SOURCES}
                         ${dir_js}
                         ${dir_FSM}
-                        ${dir_mocap}
                         ${dir_datapackage}
                         ${dir_ML}
                         ${dir_LPF}
                         ${dir_ZSM}
-                        ${dir_rl_amp}
-                        ${dir_rl_mimic}
                         ${dir_rl_cpg}
                         )
     target_link_libraries(main  PUBLIC 
-                            ${TORCH_LIBRARIES}
                             pthread
-                            LuMoSDK
                             yaml-cpp
                             MotorDrive
+                            ${TENSORRT_CUDA_RUNTIME}
+                            ${TENSORRT_INFER_LIBRARY}
+                            ${TENSORRT_ONNX_PARSER_LIBRARY}
                             # HARDWARE_TOP
                             # Main_Control_Board_Device
                             )
@@ -159,7 +144,6 @@ if(WHICH_ENV AND(WHICH_ENV STREQUAL "realrobot_mini"))
                             ${dir_ZSM}
                             )
     target_link_libraries(set_zero  PUBLIC 
-                                ${TORCH_LIBRARIES}
                                 pthread
                                 yaml-cpp
                                 MotorDrive
@@ -181,10 +165,7 @@ elseif(WHICH_ENV AND(WHICH_ENV STREQUAL "mujoco_sim_mini"))
     include_directories(${PROJECT_SOURCE_DIR}/StateMachine/include)
     include_directories(${PROJECT_SOURCE_DIR}/LowPassFilter/include)
     include_directories(${PROJECT_SOURCE_DIR}/ZeroState/include)
-    include_directories(${PROJECT_SOURCE_DIR}/RL_deploy_amp/include)
     include_directories(${PROJECT_SOURCE_DIR}/RL_deploy_cpg/include)
-
-    add_compile_definitions(DISABLE_RL_MIMIC_FOR_MUJOCO)
 
 
     aux_source_directory(${PROJECT_SOURCE_DIR}/MujocoInterface/src dir_mujoco)
@@ -193,11 +174,6 @@ elseif(WHICH_ENV AND(WHICH_ENV STREQUAL "mujoco_sim_mini"))
     aux_source_directory(${PROJECT_SOURCE_DIR}/LowPassFilter/src dir_LPF)
     aux_source_directory(${PROJECT_SOURCE_DIR}/ZeroState/src dir_ZSM)
     aux_source_directory(${PROJECT_SOURCE_DIR}/RL_deploy_cpg/src dir_rl_cpg)
-
-    list(REMOVE_ITEM dir_FSM
-        ${PROJECT_SOURCE_DIR}/StateMachine/src/RL_mimic.cpp
-    )
-
 
     
     # message(STATUS "joystick: ${dir_js}")
@@ -234,7 +210,6 @@ elseif(WHICH_ENV AND(WHICH_ENV STREQUAL "mujoco_sim_mini"))
                         ${dir_rl_cpg}
                         )
     target_link_libraries(main  PUBLIC 
-                            ${TORCH_LIBRARIES}
                             mujoco
                             glfw 
                             # Threads::Threads

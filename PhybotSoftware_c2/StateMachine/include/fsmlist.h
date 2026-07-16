@@ -8,7 +8,6 @@ IDLE,
 
 ZERO,
 RL_walk,
-RL_mimic,
 
 };
 
@@ -23,7 +22,6 @@ inline std::ostream& operator<<(std::ostream& os, const State& state) {
     switch (state) {
         case State::IDLE:     os << "IDLE"; break;
         case State::RL_walk:   os << "RL_walk"; break;
-        case State::RL_mimic:   os << "RL_mimic"; break;
         case State::ZERO:   os << "ZERO"; break;
         default:              os << "Unknown State"; break;
     }

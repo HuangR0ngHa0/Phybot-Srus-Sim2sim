@@ -173,7 +173,7 @@ void Joystick::get_state_change() {
 
     else if (xbox_m.x == 1.0) {
 
-        NextState = State::RL_mimic;
+        NextState = State::RL_walk;
 
     } 
 

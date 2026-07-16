@@ -27,7 +27,6 @@
 #include"../MotorList/include/MotorList.hpp"
 // #include "DataLogger/include/DataLogger.h"
 // #define DATALOG
-#include "Mocap/include/mocap_streamer.h"
 
 
 
@@ -50,9 +49,6 @@ int main()
   
     Joystick joystick;
     joystick.init();
-
-    MocapStreamer mocap_streamer;
-    mocap_streamer.init();
 
     HipnucReader reader;
     reader.start();
@@ -163,10 +159,6 @@ int main()
 
           package.getIMUdata(reader);
 
-          mocap_streamer.GetDataFromPackage(package);
-          mocap_streamer.Step();
-          mocap_streamer.SetDataToPackage(package);
-
 
           manager.GetDataFromPackage(package);
           manager.run(package);
@@ -252,4 +244,3 @@ int main()
 
     return 0;
 }
-

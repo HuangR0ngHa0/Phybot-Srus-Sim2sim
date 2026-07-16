@@ -230,14 +230,19 @@ public:
     bool GetControlMode(uint32_t &Index);
 
     /**
-     * @brief 快速获取位置、速度和估计转矩 此函数用于高速采样场景
-     * 
+     * @brief 快速获取位置、速度、电流和估计转矩 此函数用于高速采样场景
+     *
      * @param Pos 存储位置值的引用  单位:rad
      * @param Vel 存储速度值的引用  单位:rad/s
+     * @param Cur 存储电流值的引用
      * @param Tor_e 存储估计转矩值的引用  单位: N.m
+     * @param FastStateMechine 状态机状态
+     * @param FastBusVoltage 母线电压
+     * @param FastErrorCode 错误码
      */
 
-    void GetPVCTFast(float &Pos, float &Vel, float &Tor_e);
+    void GetPVCTFast(float &Pos, float &Vel, float &Cur, float &Tor_e,
+      uint32_t& FastStateMechine,uint32_t& FastBusVoltage, uint32_t& FastErrorCode);
 
     /**
      * @brief 获取位置、速度、电流和转矩信息

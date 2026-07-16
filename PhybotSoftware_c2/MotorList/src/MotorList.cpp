@@ -1,5 +1,7 @@
 #include "MotorList.hpp"
 
+#include <cstdint>
+
 MotorList::MotorList() : Motors_Map(nullptr)  {}
 
 MotorList::~MotorList() {
@@ -100,8 +102,17 @@ void MotorList::Init(std::string path1, std::string path2, const DataPackage &Da
 
     int i = 0;
     for (const auto& motorPair : *Motors_Map) {
-        float Pos, Vel, Tor;
-        motorPair.second->GetPVCTFast(Pos, Vel, Tor);
+        float Pos, Vel, Tor, Cur;
+        std::uint32_t FastStateMechine = 0;
+        std::uint32_t FastBusVoltage = 0;
+        std::uint32_t FastErrorCode = 0;
+        motorPair.second->GetPVCTFast(Pos,
+                                      Vel,
+                                      Cur,
+                                      Tor,
+                                      FastStateMechine,
+                                      FastBusVoltage,
+                                      FastErrorCode);
 
         i++;
     }
@@ -204,8 +215,17 @@ void MotorList::Init(std::string path1, std::string path2, std::string path3, co
 
     int i = 0;
     for (const auto& motorPair : *Motors_Map) {
-        float Pos, Vel, Tor;
-        motorPair.second->GetPVCTFast(Pos, Vel, Tor);
+        float Pos, Vel, Tor, Cur;
+        std::uint32_t FastStateMechine = 0;
+        std::uint32_t FastBusVoltage = 0;
+        std::uint32_t FastErrorCode = 0;
+        motorPair.second->GetPVCTFast(Pos,
+                                      Vel,
+                                      Cur,
+                                      Tor,
+                                      FastStateMechine,
+                                      FastBusVoltage,
+                                      FastErrorCode);
 
         i++;
     }
@@ -448,8 +468,17 @@ void MotorList::GetStates(Eigen::VectorXd &pos, Eigen::VectorXd &vel, Eigen::Vec
             throw std::runtime_error("Invalid motor driver at index " + std::to_string(i));
         }
         
-        float Pos, Vel, Tor;
-        motorPair.second->GetPVCTFast(Pos, Vel, Tor);
+        float Pos, Vel, Tor, Cur;
+        std::uint32_t FastStateMechine = 0;
+        std::uint32_t FastBusVoltage = 0;
+        std::uint32_t FastErrorCode = 0;
+        motorPair.second->GetPVCTFast(Pos,
+                                      Vel,
+                                      Cur,
+                                      Tor,
+                                      FastStateMechine,
+                                      FastBusVoltage,
+                                      FastErrorCode);
 
 
 
@@ -670,5 +699,3 @@ void ThirdpolyVector(
         pd_dot.setZero();
     }
 }
-
-

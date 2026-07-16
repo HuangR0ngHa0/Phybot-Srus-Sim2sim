@@ -44,8 +44,6 @@ public:
                 return "ZERO";
             case State::RL_walk:
                 return "RL";
-            case State::RL_mimic:
-                return "RL";
             default:
                 return "UNKNOWN";
         }
