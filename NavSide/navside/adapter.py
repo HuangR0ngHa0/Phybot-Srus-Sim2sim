@@ -1,12 +1,14 @@
 import os
 import time
+import sys
+from pathlib import Path
 from typing import Dict, Optional
 
 import numpy as np
-from scipy.spatial.transform import Rotation as R
 
 from .image import resize_image
 from .state import SruRobotState
+from .timing import RateMeter, timing_log
 
 
 STATE_DIM = 16
@@ -26,16 +28,21 @@ class SruNavAdapter:
         self,
         encoder_path: str,
         policy_path: str,
-        dry_run_hz: float = 5.0,
+        dry_run_hz: float = 8.0,
         min_depth: float = 0.25,
         max_depth: float = 10.0,
         policy_scale: np.ndarray = DEFAULT_POLICY_SCALE,
         verbose: bool = True,
+        inference_backend: str = "tensorrt",
+        encoder_engine_path: Optional[str] = None,
+        policy_engine_path: Optional[str] = None,
     ):
-        import onnxruntime as ort
-
+        init_t0 = time.perf_counter()
         self.encoder_path = encoder_path
         self.policy_path = policy_path
+        self.inference_backend = (inference_backend or "tensorrt").strip().lower()
+        self.encoder_engine_path = encoder_engine_path or encoder_path
+        self.policy_engine_path = policy_engine_path or policy_path
         self.dry_run_interval = 1.0 / dry_run_hz
         self.min_depth = min_depth
         self.max_depth = max_depth
@@ -46,6 +53,89 @@ class SruNavAdapter:
         self.h_state = np.zeros((1, 1, LSTM_HIDDEN_DIM), dtype=np.float32)
         self.c_state = np.zeros((1, 1, LSTM_HIDDEN_DIM), dtype=np.float32)
         self.last_depth_preprocess_info: Dict[str, np.ndarray] = {}
+        self._timing_logged_first_encode_depth = False
+        self._timing_logged_first_run_policy = False
+        self.encoder_rate_meter = RateMeter("encoder_trt")
+        self.policy_rate_meter = RateMeter("policy_trt")
+
+        backend_setup_t0 = time.perf_counter()
+        if self.inference_backend == "tensorrt":
+            if not encoder_engine_path or not policy_engine_path:
+                raise ValueError(
+                    "TensorRT backend requires encoder_engine_path and policy_engine_path"
+                )
+            self._setup_tensorrt_backend()
+        elif self.inference_backend == "onnxruntime":
+            self._setup_onnxruntime_backend()
+        else:
+            raise ValueError(f"Unsupported inference backend: {self.inference_backend}")
+        timing_log("adapter_backend_setup_total", time.perf_counter() - backend_setup_t0)
+
+        print(
+            "[SRU] adapter ready | backend={} encoder={} policy={} encoder_engine={} policy_engine={}".format(
+                self.inference_backend,
+                self.encoder_path,
+                self.policy_path,
+                self.encoder_engine_path,
+                self.policy_engine_path,
+            )
+        )
+        timing_log("adapter_init_total", time.perf_counter() - init_t0)
+
+    def _check_model_path(self, path: str) -> None:
+        if not os.path.isfile(path):
+            raise FileNotFoundError(f"SRU model file not found: {path}")
+
+    def _cpp_trt_build_dir(self) -> Path:
+        return Path(__file__).resolve().parents[1] / "cpp_trt" / "build"
+
+    def _setup_tensorrt_backend(self) -> None:
+        self._check_model_path(self.encoder_engine_path)
+        self._check_model_path(self.policy_engine_path)
+
+        build_dir = self._cpp_trt_build_dir()
+        if str(build_dir) not in sys.path:
+            sys.path.insert(0, str(build_dir))
+
+        import_t0 = time.perf_counter()
+        try:
+            import navside_trt
+        except Exception as exc:
+            raise RuntimeError(
+                "TensorRT backend init failed | "
+                f"backend={self.inference_backend} "
+                f"extension_path={build_dir / 'navside_trt.so'} "
+                f"encoder_engine_path={self.encoder_engine_path} "
+                f"policy_engine_path={self.policy_engine_path} "
+                f"error={exc}"
+            ) from exc
+        timing_log("adapter_tensorrt_extension_import", time.perf_counter() - import_t0)
+
+        runner_t0 = time.perf_counter()
+        try:
+            self.trt_runner = navside_trt.NavSideTRTRunner(
+                self.encoder_engine_path,
+                self.policy_engine_path,
+            )
+        except Exception as exc:
+            raise RuntimeError(
+                "TensorRT backend runner init failed | "
+                f"backend={self.inference_backend} "
+                f"extension_path={build_dir / 'navside_trt.so'} "
+                f"encoder_engine_path={self.encoder_engine_path} "
+                f"policy_engine_path={self.policy_engine_path} "
+                f"error={exc}"
+            ) from exc
+        timing_log("adapter_tensorrt_runner_construct", time.perf_counter() - runner_t0)
+
+        self.encoder_session = None
+        self.policy_session = None
+        self.encoder_input_name = None
+        self.encoder_output_name = None
+        self.policy_output_names = None
+
+    def _setup_onnxruntime_backend(self) -> None:
+        import onnxruntime as ort
 
         self._check_model_path(self.encoder_path)
         self._check_model_path(self.policy_path)
@@ -76,15 +166,17 @@ class SruNavAdapter:
         self.encoder_output_name = self.encoder_session.get_outputs()[0].name
         self.policy_output_names = [out.name for out in self.policy_session.get_outputs()]
 
-        print(
-            "[SRU] adapter ready | providers={} encoder={} policy={}".format(
-                providers, self.encoder_path, self.policy_path
-            )
+    @staticmethod
+    def _rotation_matrix_from_quat_wxyz(quat_wxyz: np.ndarray) -> np.ndarray:
+        w, x, y, z = np.asarray(quat_wxyz, dtype=np.float32).reshape(4)
+        return np.array(
+            [
+                [1.0 - 2.0 * (y * y + z * z), 2.0 * (x * y - z * w), 2.0 * (x * z + y * w)],
+                [2.0 * (x * y + z * w), 1.0 - 2.0 * (x * x + z * z), 2.0 * (y * z - x * w)],
+                [2.0 * (x * z - y * w), 2.0 * (y * z + x * w), 1.0 - 2.0 * (x * x + y * y)],
+            ],
+            dtype=np.float32,
         )
-
-    def _check_model_path(self, path: str) -> None:
-        if not os.path.isfile(path):
-            raise FileNotFoundError(f"SRU model file not found: {path}")
 
     def should_tick(self, now: float) -> bool:
         if self.last_policy_time is None:
@@ -121,15 +213,31 @@ class SruNavAdapter:
         )
         obs = np.concatenate([state_input, depth_feature])[np.newaxis].astype(np.float32)
 
-        outputs = self.policy_session.run(
-            self.policy_output_names,
-            {
-                "obs": obs,
-                "h_in": self.h_state,
-                "c_in": self.c_state,
-            },
-        )
-        raw_action, self.h_state, self.c_state = outputs
+        if self.inference_backend == "tensorrt":
+            policy_t0 = time.perf_counter()
+            raw_action, self.h_state, self.c_state = self.trt_runner.run_policy(
+                np.ascontiguousarray(obs, dtype=np.float32),
+                np.ascontiguousarray(self.h_state, dtype=np.float32),
+                np.ascontiguousarray(self.c_state, dtype=np.float32),
+            )
+            if not self._timing_logged_first_run_policy:
+                timing_log("adapter_first_run_policy", time.perf_counter() - policy_t0)
+                self._timing_logged_first_run_policy = True
+            self.policy_rate_meter.tick()
+        else:
+            policy_t0 = time.perf_counter()
+            outputs = self.policy_session.run(
+                self.policy_output_names,
+                {
+                    "obs": np.ascontiguousarray(obs, dtype=np.float32),
+                    "h_in": np.ascontiguousarray(self.h_state, dtype=np.float32),
+                    "c_in": np.ascontiguousarray(self.c_state, dtype=np.float32),
+                },
+            )
+            raw_action, self.h_state, self.c_state = outputs
+            if not self._timing_logged_first_run_policy:
+                timing_log("adapter_first_run_policy", time.perf_counter() - policy_t0)
+                self._timing_logged_first_run_policy = True
         raw_action = raw_action.squeeze(0).astype(np.float32)
         cmd_vel = (np.tanh(raw_action) * self.policy_scale).astype(np.float32)
         self.last_action = raw_action.copy()
@@ -229,9 +337,22 @@ class SruNavAdapter:
                 dtype=np.float32,
             ),
         }
-        vae_output = self.encoder_session.run(
-            [self.encoder_output_name], {self.encoder_input_name: depth_tensor}
-        )[0]
+        if self.inference_backend == "tensorrt":
+            encode_t0 = time.perf_counter()
+            vae_output = self.trt_runner.encode_depth(np.ascontiguousarray(depth_tensor, dtype=np.float32))
+            if not self._timing_logged_first_encode_depth:
+                timing_log("adapter_first_encode_depth", time.perf_counter() - encode_t0)
+                self._timing_logged_first_encode_depth = True
+            self.encoder_rate_meter.tick()
+        else:
+            encode_t0 = time.perf_counter()
+            vae_output = self.encoder_session.run(
+                [self.encoder_output_name],
+                {self.encoder_input_name: np.ascontiguousarray(depth_tensor, dtype=np.float32)},
+            )[0]
+            if not self._timing_logged_first_encode_depth:
+                timing_log("adapter_first_encode_depth", time.perf_counter() - encode_t0)
+                self._timing_logged_first_encode_depth = True
         return vae_output.flatten().astype(np.float32)
 
     def _center_crop_depth(self, depth: np.ndarray, target_width: int, target_height: int) -> np.ndarray:
@@ -255,13 +376,9 @@ class SruNavAdapter:
         robot_pos_w = np.asarray(robot_pos_w, dtype=np.float32).reshape(3)
         robot_quat_wxyz = np.asarray(robot_quat_wxyz, dtype=np.float32).reshape(4)
 
-        quat_xyzw = np.array(
-            [robot_quat_wxyz[1], robot_quat_wxyz[2], robot_quat_wxyz[3], robot_quat_wxyz[0]],
-            dtype=np.float32,
-        )
-        rot_wb = R.from_quat(quat_xyzw)
+        rot_wb = self._rotation_matrix_from_quat_wxyz(robot_quat_wxyz)
         target_vec_w = target_pos_w - robot_pos_w
-        target_vec_b = rot_wb.inv().apply(target_vec_w).astype(np.float32)
+        target_vec_b = rot_wb @ target_vec_w
 
         dist = float(np.linalg.norm(target_vec_b) + 1e-6)
         target_dir_b = target_vec_b / dist

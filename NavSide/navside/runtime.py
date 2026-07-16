@@ -1,4 +1,5 @@
 import argparse
+import time
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -7,6 +8,7 @@ import yaml
 
 from .adapter import SruNavAdapter
 from .state import SruRobotState
+from .timing import timing_log
 
 
 DEFAULT_CONFIG = Path(__file__).resolve().parents[1] / "config" / "nav.yaml"
@@ -16,7 +18,10 @@ DEFAULT_CONFIG = Path(__file__).resolve().parents[1] / "config" / "nav.yaml"
 class NavSideConfig:
     encoder_path: str
     policy_path: str
-    dry_run_hz: float = 5.0
+    encoder_engine_path: str
+    policy_engine_path: str
+    inference_backend: str = "tensorrt"
+    dry_run_hz: float = 8.0
     vx_max: float = 1
     wz_max: float = 1.5
     walk_threshold: float = 0.3
@@ -28,6 +33,7 @@ class NavSideConfig:
 
 
 def load_nav_config(config_path: str) -> NavSideConfig:
+    t0 = time.perf_counter()
     data = yaml.safe_load(Path(config_path).read_text(encoding="utf-8"))
     model_cfg = data.get("models", {})
     control_cfg = data.get("control", {})
@@ -35,10 +41,13 @@ def load_nav_config(config_path: str) -> NavSideConfig:
     log_cfg = data.get("logging", {})
     goal_cfg = data.get("goal", {})
     base_dir = Path(config_path).resolve().parent
-    return NavSideConfig(
-        encoder_path=str(base_dir / model_cfg.get("encoder_path", "../models/vae_encoder.onnx")),
-        policy_path=str(base_dir / model_cfg.get("policy_path", "../models/policy.onnx")),
-        dry_run_hz=float(control_cfg.get("dry_run_hz", 5.0)),
+    config = NavSideConfig(
+        encoder_path=str(base_dir / model_cfg.get("encoder_path", "../asset/models/vae_pretrain_new.onnx")),
+        policy_path=str(base_dir / model_cfg.get("policy_path", "../asset/models/policy_1.onnx")),
+        encoder_engine_path=str(base_dir / model_cfg.get("encoder_engine_path", "../asset/models/vae_pretrain_new.plan")),
+        policy_engine_path=str(base_dir / model_cfg.get("policy_engine_path", "../asset/models/policy_1.plan")),
+        inference_backend=str(model_cfg.get("inference_backend", "tensorrt")),
+        dry_run_hz=float(control_cfg.get("dry_run_hz", 8.0)),
         vx_max=float(control_cfg.get("vx_max", 0.45)),
         wz_max=float(control_cfg.get("wz_max", 0.4)),
         walk_threshold=float(control_cfg.get("walk_threshold", 0.3)),
@@ -48,11 +57,15 @@ def load_nav_config(config_path: str) -> NavSideConfig:
         verbose_sru=bool(log_cfg.get("verbose_sru", True)),
         default_goal_w=tuple(goal_cfg.get("default_goal_w", [5.0, 1.0, 0.0])),
     )
+    timing_log("runtime_load_nav_config", time.perf_counter() - t0)
+    return config
 
 
 class NavSideApp:
     def __init__(self, config: NavSideConfig):
+        t0 = time.perf_counter()
         self.config = config
+        adapter_t0 = time.perf_counter()
         self.adapter = SruNavAdapter(
             encoder_path=config.encoder_path,
             policy_path=config.policy_path,
@@ -60,8 +73,13 @@ class NavSideApp:
             min_depth=config.min_depth,
             max_depth=config.max_depth,
             verbose=config.verbose_sru,
+            inference_backend=config.inference_backend,
+            encoder_engine_path=config.encoder_engine_path,
+            policy_engine_path=config.policy_engine_path,
         )
+        timing_log("runtime_adapter_construct", time.perf_counter() - adapter_t0)
         self.last_final_cmd = np.zeros(3, dtype=np.float32)
+        timing_log("runtime_app_init_total", time.perf_counter() - t0)
 
     @classmethod
     def from_config(cls, config_path: str):
@@ -162,10 +180,12 @@ def build_parser():
 
 
 def main():
+    t0 = time.perf_counter()
     args = build_parser().parse_args()
     if not args.sim_control:
         raise SystemExit("--sim-control is required.")
 
     from .sim import run as run_mujoco_sim
 
+    timing_log("runtime_main_pre_sim", time.perf_counter() - t0)
     run_mujoco_sim(args)

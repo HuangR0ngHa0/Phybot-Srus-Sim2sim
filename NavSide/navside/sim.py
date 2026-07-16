@@ -9,6 +9,7 @@ from .runtime import NavSideApp
 from .bridge import NavStatePacketV2, RobotComm
 from .depth import get_camera_images
 from .state import SruRobotState
+from .timing import timing_log
 
 try:
     import mujoco
@@ -199,7 +200,10 @@ def _validate_strict_zed_mini_render_size(render_width, render_height, config_pa
 
 
 def run(args):
+    run_t0 = time.perf_counter()
+    config_t0 = time.perf_counter()
     config = _load_nav_config(args.config)
+    timing_log("sim_load_nav_config", time.perf_counter() - config_t0)
     sim_cfg = config.get("sim", {})
     udp_cfg = config.get("udp", {})
     goal_cfg = config.get("goal", {})
@@ -237,7 +241,9 @@ def run(args):
         comm.send_zero()
         time.sleep(0.1)
 
+    model_t0 = time.perf_counter()
     model = mujoco.MjModel.from_xml_path(xml_path)
+    timing_log("sim_load_mujoco_xml", time.perf_counter() - model_t0)
     data = mujoco.MjData(model)
     _apply_spawn_to_mujoco(model, data, spawn_pos, spawn_yaw)
     spawn_marker_ok, goal_marker_ok = _configure_viewer_markers(model, spawn_pos, goal)
@@ -265,11 +271,18 @@ def run(args):
 
     last_safe_cmd = np.zeros(3, dtype=np.float32)
     last_print_time = 0.0
+    first_control_loop_logged = False
+    first_render_logged = False
+    viewer_launch_t0 = time.perf_counter()
 
     try:
         with mujoco.viewer.launch_passive(model, data) as viewer:
+            timing_log("sim_viewer_launch", time.perf_counter() - viewer_launch_t0)
             _enable_viewer_marker_group(viewer)
             while viewer.is_running():
+                if not first_control_loop_logged:
+                    timing_log("sim_first_control_loop_entry", time.perf_counter() - run_t0)
+                    first_control_loop_logged = True
                 now = time.time()
                 state_packet = None if ignore_udp_state else comm.get_latest_state()
                 if state_packet is not None:
@@ -286,6 +299,9 @@ def run(args):
                         cam_id,
                         hidden_geom_groups=(VIEWER_ONLY_MARKER_GROUP,),
                     )
+                    if not first_render_logged:
+                        timing_log("sim_first_frame_render", time.perf_counter() - run_t0)
+                        first_render_logged = True
 
                 if need_tick:
                     try:

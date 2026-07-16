@@ -3,7 +3,7 @@ models:
   policy_path: ../asset/models/nav_policy.onnx
 
 control:
-  dry_run_hz: 5.0
+  dry_run_hz: 8.0
   vx_max: 1
   wz_max: 1.5
   walk_threshold: 0.3
