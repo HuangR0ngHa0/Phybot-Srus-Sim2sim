@@ -112,11 +112,47 @@ make -j4
 
 - `NavSide/cpp_trt/build/navside_trt*.so`
 
-### 2. 编译 `mujoco_sim_mini`
+### 2. 编译 RobotSide
+
+RobotSide 推荐使用仓库自带脚本：
 
 ```bash
 cd /home/amov/nav_arm_mujoco/PhybotSoftware_c2
-mkdir -p build
+./autobuild.sh
+```
+
+`autobuild.sh` 会进入交互菜单：
+
+```text
+1.realrobot_mini
+2.webots_sim
+3.mujoco_sim_mini
+4.gazebo_sim
+```
+
+当前主线只使用：
+
+- 输入 `3` 编译 `mujoco_sim_mini`
+- 输入 `1` 编译 `realrobot_mini`
+
+脚本默认使用 `PhybotSoftware_c2/build/` 作为构建目录。切换 `mujoco_sim_mini` 和 `realrobot_mini` 之前，建议先清理同一个 build 目录：
+
+```bash
+cd /home/amov/nav_arm_mujoco/PhybotSoftware_c2
+./autoclean.sh
+./autobuild.sh
+```
+
+预期产物：
+
+- `mujoco_sim_mini`: `PhybotSoftware_c2/build/main`
+- `realrobot_mini`: `PhybotSoftware_c2/build/main` and `PhybotSoftware_c2/build/set_zero`
+
+手动 CMake 只作为调试方式使用。需要定位 configure/link 错误时可以直接指定 `WHICH_ENV`：
+
+```bash
+cd /home/amov/nav_arm_mujoco/PhybotSoftware_c2
+./autoclean.sh
 cd build
 cmake \
   -DWHICH_ENV=mujoco_sim_mini \
@@ -126,16 +162,10 @@ cmake \
 make -j4
 ```
 
-预期产物：
-
-- `PhybotSoftware_c2/build/main`
-
-### 3. 编译 `realrobot_mini`
-
 ```bash
 cd /home/amov/nav_arm_mujoco/PhybotSoftware_c2
-mkdir -p build_realrobot
-cd build_realrobot
+./autoclean.sh
+cd build
 cmake \
   -DWHICH_ENV=realrobot_mini \
   -DCMAKE_BUILD_TYPE=Release \
@@ -143,11 +173,6 @@ cmake \
   ..
 make -j4
 ```
-
-预期产物：
-
-- `PhybotSoftware_c2/build_realrobot/main`
-- `PhybotSoftware_c2/build_realrobot/set_zero`
 
 ## 启动方法
 
@@ -173,14 +198,14 @@ python3 -u -B scripts/run_nav.py --sim-control
 `set_zero` 只用于零位相关流程：
 
 ```bash
-cd /home/amov/nav_arm_mujoco/PhybotSoftware_c2/build_realrobot
+cd /home/amov/nav_arm_mujoco/PhybotSoftware_c2/build
 ./set_zero
 ```
 
 `main` 是真实机器人主程序入口，但当前仓库只承诺“可编译”，不承诺“已完成真实硬件运行验证”：
 
 ```bash
-cd /home/amov/nav_arm_mujoco/PhybotSoftware_c2/build_realrobot
+cd /home/amov/nav_arm_mujoco/PhybotSoftware_c2/build
 ./main
 ```
 
