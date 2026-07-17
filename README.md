@@ -93,9 +93,8 @@ RobotSide 默认低层策略：
 
 ```bash
 cd /home/amov
-git clone <your-repo-url> nav_arm_mujoco
+git clone -b arm git@github.com:HuangR0ngHa0/Phybot-Srus-Sim2sim.git nav_arm_mujoco
 cd nav_arm_mujoco
-git checkout arm
 ```
 
 ### 1. 编译 NavSide C++ TensorRT extension
