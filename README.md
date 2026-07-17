@@ -148,6 +148,18 @@ cd /home/amov/nav_arm_mujoco/PhybotSoftware_c2
 - `mujoco_sim_mini`: `PhybotSoftware_c2/build/main`
 - `realrobot_mini`: `PhybotSoftware_c2/build/main` and `PhybotSoftware_c2/build/set_zero`
 
+`autobuild.sh` 默认使用 `/usr/local/cuda`。如果 CUDA 安装路径不同，可以显式覆盖：
+
+```bash
+CUDA_TOOLKIT_ROOT_DIR=/path/to/cuda ./autobuild.sh
+```
+
+`/dev/ttyUSB4` 只属于真实机器人硬件链路。脚本只在选择 `realrobot_mini` 时尝试设置串口权限；如果真实设备路径不同，可以覆盖：
+
+```bash
+TTY_DEVICE=/dev/ttyUSB0 ./autobuild.sh
+```
+
 手动 CMake 只作为调试方式使用。需要定位 configure/link 错误时可以直接指定 `WHICH_ENV`：
 
 ```bash

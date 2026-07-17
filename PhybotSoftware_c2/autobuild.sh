@@ -1,21 +1,14 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-sudo chmod 777 /dev/ttyUSB4
+TTY_DEVICE="${TTY_DEVICE:-/dev/ttyUSB4}"
+CUDA_TOOLKIT_ROOT_DIR="${CUDA_TOOLKIT_ROOT_DIR:-/usr/local/cuda}"
 
 BASE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 LIB_PATH1="$BASE_DIR/ThirdParty/urdfdom/lib"
 LIB_PATH2="$BASE_DIR/ThirdParty/boost/lib"
-EXPORT_LINE="export LD_LIBRARY_PATH=\"$LIB_PATH1:$LIB_PATH2:\$LD_LIBRARY_PATH\""
-
-if grep -Fxq "$EXPORT_LINE" ~/.bashrc; then
-    echo "LD_LIBRARY_PATH 已存在于 ~/.bashrc 中，无需重复添加"
-else
-    echo "$EXPORT_LINE" >> ~/.bashrc
-    echo "已将 LD_LIBRARY_PATH 添加到 ~/.bashrc, 请重启！"
-fi
-
-source ~/.bashrc
+export LD_LIBRARY_PATH="$LIB_PATH1:$LIB_PATH2:${LD_LIBRARY_PATH:-}"
+echo "Using LD_LIBRARY_PATH=$LD_LIBRARY_PATH"
 
 echo "==================PHYBOT SOFTWARE=================="
 echo "1.realrobot_mini"
@@ -43,17 +36,25 @@ case "$control_system_enter" in
         ;;
 esac
 
+if [ "$control_system_enter" = "realrobot_mini" ]; then
+    if [[ -e "$TTY_DEVICE" ]]; then
+        sudo chmod 777 "$TTY_DEVICE"
+    else
+        echo "Warning: $TTY_DEVICE not found; realrobot runtime may need a serial device."
+    fi
+fi
+
 root=$(pwd)
 build_dir="$root/build"
 mkdir -p "$build_dir"
 echo "$build_dir"
 
 if [ "$control_system_enter" = "mujoco_sim_mini" ]; then
-    cmake -S "$root" -B "$build_dir" -DWHICH_ENV="$control_system_enter" -DCMAKE_BUILD_TYPE=Release
+    cmake -S "$root" -B "$build_dir" -DWHICH_ENV="$control_system_enter" -DCMAKE_BUILD_TYPE=Release -DCUDA_TOOLKIT_ROOT_DIR="$CUDA_TOOLKIT_ROOT_DIR"
     cmake --build "$build_dir" -- -j8
 else
     pushd "$build_dir" >/dev/null
-    cmake -DWHICH_ENV="${control_system_enter}" "$root" -DCMAKE_BUILD_TYPE=Release .
+    cmake -DWHICH_ENV="${control_system_enter}" "$root" -DCMAKE_BUILD_TYPE=Release -DCUDA_TOOLKIT_ROOT_DIR="$CUDA_TOOLKIT_ROOT_DIR" .
     make -j8
     popd >/dev/null
 fi
