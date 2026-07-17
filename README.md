@@ -229,6 +229,25 @@ NAVSIDE_TIMING=1
 ROBOTSIDE_TIMING=1
 SRU_TIMING=1
 ```
+###使用方法
+
+```bash
+RobotSide 终端：
+
+export ROBOTSIDE_TIMING=1
+export SRU_TIMING=1
+cd /home/amov/nav_arm_mujoco/PhybotSoftware_c2/build
+./main
+
+NavSide 终端：
+
+export NAVSIDE_TIMING=1
+export SRU_TIMING=1
+cd /home/amov/nav_arm_mujoco/NavSide
+PYTHONPATH=/home/amov/nav_arm_mujoco/NavSide:/home/amov/nav_arm_mujoco/NavSide/cpp_trt/build \
+python3 -u -B scripts/run_nav.py --sim-control
+
+```
 
 关键输出：
 
