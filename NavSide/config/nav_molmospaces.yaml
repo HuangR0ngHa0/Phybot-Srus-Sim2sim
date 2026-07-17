@@ -28,8 +28,6 @@ sim:
   # crop to 1728x1080 and resize to the SRU 64x40 encoder input.
   render_width: 1920
   render_height: 1200
-  render_fps: 30.0
-  display_scale: 0.5
 
 udp:
   local_ip: 127.0.0.1

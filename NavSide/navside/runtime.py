@@ -85,6 +85,10 @@ class NavSideApp:
         state: SruRobotState,
         target_pos_w: np.ndarray,
         timestamp: float | None = None,
+        vx_max: float | None = None,
+        wz_max: float | None = None,
+        walk_threshold: float | None = None,
+        print_control: bool = True,
     ):
         diag = self.adapter.step(
             depth_img=depth_img,
@@ -95,11 +99,14 @@ class NavSideApp:
         if diag is None:
             return None
 
+        vx_limit = self.config.vx_max if vx_max is None else vx_max
+        wz_limit = self.config.wz_max if wz_max is None else wz_max
+        walk_limit = self.config.walk_threshold if walk_threshold is None else walk_threshold
         control_info = self.adapter.build_control_command(
             diag,
-            vx_max=self.config.vx_max,
-            wz_max=self.config.wz_max,
-            walk_threshold=self.config.walk_threshold,
+            vx_max=vx_limit,
+            wz_max=wz_limit,
+            walk_threshold=walk_limit,
         )
 
         goal_dist = float(np.linalg.norm(np.asarray(diag["target_vec_b"], dtype=np.float32)))
@@ -110,16 +117,17 @@ class NavSideApp:
             control_info["above_walk_threshold"] = False
 
         self.last_final_cmd = np.asarray(control_info["final_cmd"], dtype=np.float32).copy()
-        print(
-            "[NavSide] control raw={} final={} walk_threshold={} above_walk_threshold={} zero_reason={} goal_dist={:.4f}".format(
-                np.array2string(control_info["raw_cmd"], precision=4),
-                np.array2string(control_info["final_cmd"], precision=4),
-                control_info["walk_threshold"],
-                control_info["above_walk_threshold"],
-                control_info["zero_reason"],
-                goal_dist,
+        if print_control:
+            print(
+                "[NavSide] control raw={} final={} walk_threshold={} above_walk_threshold={} zero_reason={} goal_dist={:.4f}".format(
+                    np.array2string(control_info["raw_cmd"], precision=4),
+                    np.array2string(control_info["final_cmd"], precision=4),
+                    control_info["walk_threshold"],
+                    control_info["above_walk_threshold"],
+                    control_info["zero_reason"],
+                    goal_dist,
+                )
             )
-        )
 
         return {
             "diag": diag,
@@ -158,6 +166,11 @@ def build_parser():
     parser.add_argument("--camera-name", default=None, help="Optional MuJoCo camera name override for sim mode.")
     parser.add_argument("--verbose-sru", action="store_true", help="Print full SRU per-tick diagnostics in sim mode.")
     parser.add_argument("--summary-hz", type=float, default=None, help="Summary log frequency in sim mode.")
+    parser.add_argument(
+        "--show-camera",
+        action="store_true",
+        help="Show an OpenCV window with the policy camera RGB image and depth visualization.",
+    )
     return parser
 
 

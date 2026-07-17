@@ -2,21 +2,81 @@ import time
 import traceback
 from pathlib import Path
 
-import cv2
-import mujoco
-import mujoco.viewer
 import numpy as np
 import yaml
 
+from .mode import NavMode, NavModeController
 from .runtime import NavSideApp
 from .bridge import NavStatePacketV2, RobotComm
-from .depth import get_camera_images, make_depth_viz, make_rgb_viz
+from .depth import get_camera_images
+from .image import depth_to_rgb_uint8, resize_image, rgb_to_uint8
 from .state import SruRobotState
+
+try:
+    import mujoco
+    import mujoco.viewer
+except Exception as exc:  # pragma: no cover - runtime dependency check
+    raise RuntimeError(
+        "NavSide sim requires the MuJoCo Python binding in the active Python environment."
+    ) from exc
 
 
 VIEWER_ONLY_MARKER_GROUP = 5
 STRICT_ZED_MINI_RENDER_WIDTH = 1920
 STRICT_ZED_MINI_RENDER_HEIGHT = 1200
+CAMERA_VIEW_WIDTH = 640
+CAMERA_VIEW_HEIGHT = 400
+CAMERA_VIEW_HZ = 10.0
+
+
+class CameraVisualizer:
+    def __init__(self, enabled: bool):
+        self.enabled = bool(enabled)
+        self.cv2 = None
+        self.window_name = "NavSide Camera: RGB | Depth"
+
+    def _ensure_window(self):
+        if not self.enabled or self.cv2 is not None:
+            return
+        try:
+            import cv2
+
+            self.cv2 = cv2
+            cv2.namedWindow(self.window_name, cv2.WINDOW_NORMAL)
+        except Exception as exc:
+            print(f"[NavSide] camera visualizer disabled: {exc}")
+            self.enabled = False
+            self.cv2 = None
+
+    def update(self, rgb_img, depth_img):
+        if not self.enabled:
+            return
+        self._ensure_window()
+        if not self.enabled or self.cv2 is None:
+            return
+
+        rgb = resize_image(rgb_to_uint8(rgb_img), CAMERA_VIEW_WIDTH, CAMERA_VIEW_HEIGHT)
+        depth = resize_image(depth_to_rgb_uint8(depth_img), CAMERA_VIEW_WIDTH, CAMERA_VIEW_HEIGHT)
+        rgb = rgb.astype(np.uint8)
+        depth = depth.astype(np.uint8)
+
+        # MuJoCo renders RGB, while OpenCV imshow expects BGR.
+        rgb_bgr = self.cv2.cvtColor(rgb, self.cv2.COLOR_RGB2BGR)
+        depth_bgr = self.cv2.cvtColor(depth, self.cv2.COLOR_RGB2BGR)
+        canvas = np.concatenate([rgb_bgr, depth_bgr], axis=1)
+        self.cv2.imshow(self.window_name, canvas)
+        key = self.cv2.waitKey(1) & 0xFF
+        if key in (27, ord("q")):
+            self.close()
+            self.enabled = False
+
+    def close(self):
+        if self.cv2 is None:
+            return
+        try:
+            self.cv2.destroyWindow(self.window_name)
+        except Exception:
+            pass
 
 
 def _load_nav_config(config_path: str) -> dict:
@@ -193,15 +253,6 @@ def _validate_strict_zed_mini_render_size(render_width, render_height, config_pa
         )
 
 
-def _resize_viz_for_display(image, display_scale):
-    if image is None or abs(display_scale - 1.0) < 1e-6:
-        return image
-    height, width = image.shape[:2]
-    display_width = max(1, int(round(width * display_scale)))
-    display_height = max(1, int(round(height * display_scale)))
-    return cv2.resize(image, (display_width, display_height), interpolation=cv2.INTER_AREA)
-
-
 def run(args):
     config = _load_nav_config(args.config)
     sim_cfg = config.get("sim", {})
@@ -216,11 +267,6 @@ def run(args):
     render_height = int(sim_cfg.get("render_height", STRICT_ZED_MINI_RENDER_HEIGHT))
     render_width = int(sim_cfg.get("render_width", STRICT_ZED_MINI_RENDER_WIDTH))
     _validate_strict_zed_mini_render_size(render_width, render_height, args.config)
-    render_fps = float(sim_cfg.get("render_fps", 30.0))
-    render_interval = 1.0 / max(render_fps, 1e-6)
-    display_scale = float(sim_cfg.get("display_scale", 0.5))
-    if display_scale <= 0.0:
-        raise ValueError(f"sim.display_scale must be > 0, got {display_scale}")
     goal = _parse_goal(args.goal, goal_cfg.get("default_goal_w", [5.0, 1.0, 0.0]))
     spawn_pos = _parse_vec3(args.spawn, sim_cfg.get("spawn_w"), "spawn")
     spawn_yaw = args.spawn_yaw if args.spawn_yaw is not None else sim_cfg.get("spawn_yaw")
@@ -232,6 +278,8 @@ def run(args):
 
     app = NavSideApp.from_config(args.config)
     app.adapter.verbose = bool(args.verbose_sru or log_cfg.get("verbose_sru", False))
+    app.adapter.reset_recurrent_state()
+    mode_controller = NavModeController()
 
     comm = RobotComm(
         local_ip=udp_cfg.get("local_ip", "127.0.0.1"),
@@ -259,7 +307,7 @@ def run(args):
     print(f"[NavSide] MuJoCo XML: {xml_path}")
     print(
         f"[NavSide] camera={camera_name} size={render_width}x{render_height} "
-        f"display_scale={display_scale} goal={goal.tolist()}"
+        f"goal={goal.tolist()}"
     )
     print(
         "[NavSide] spawn={} spawn_yaw={} markers(spawn={}, goal={}) marker_group={}".format(
@@ -271,14 +319,22 @@ def run(args):
         )
     )
     print(f"[NavSide] ignore_udp_state={ignore_udp_state}")
+    camera_visualizer = CameraVisualizer(enabled=getattr(args, "show_camera", False))
+    if camera_visualizer.enabled:
+        print("[NavSide] camera visualizer enabled. Press q or Esc in the camera window to close it.")
 
-    latest_rgb_viz = None
-    latest_depth_viz = None
     last_safe_cmd = np.zeros(3, dtype=np.float32)
+    policy_cmd = np.zeros(3, dtype=np.float32)
+    zero_reason = "standby"
+    goal_dist = None
     last_print_time = 0.0
-    last_render_time = 0.0
+    last_output_time = 0.0
+    last_camera_view_time = 0.0
+    output_interval = 1.0 / max(app.config.dry_run_hz, 1e-6)
+    camera_view_interval = 1.0 / max(CAMERA_VIEW_HZ, 1e-6)
 
     try:
+        mode_controller.start_input_thread()
         with mujoco.viewer.launch_passive(model, data) as viewer:
             _enable_viewer_marker_group(viewer)
             while viewer.is_running():
@@ -288,19 +344,82 @@ def run(args):
                     _apply_udp_state_to_mujoco(data, state_packet)
                     mujoco.mj_forward(model, data)
 
-                need_tick = app.adapter.should_tick(now)
-                rgb_img = None
-                depth_img = None
-                if need_tick:
-                    rgb_img, depth_img = get_camera_images(
-                        renderer,
-                        data,
-                        cam_id,
-                        hidden_geom_groups=(VIEWER_ONLY_MARKER_GROUP,),
-                    )
+                for event in mode_controller.poll_events():
+                    if event.accepted and event.key in ("A", "G"):
+                        app.adapter.reset_recurrent_state()
+                        last_safe_cmd = np.zeros(3, dtype=np.float32)
+                        policy_cmd = np.zeros(3, dtype=np.float32)
+                        goal_dist = None
+                        zero_reason = "quit_to_standby" if event.key == "G" else "standby"
+                        mode_controller.update_status(
+                            final_cmd=last_safe_cmd,
+                            policy_cmd=policy_cmd,
+                            goal_dist=goal_dist,
+                            zero_reason=zero_reason,
+                            state_source=_state_source_name(state_packet),
+                            robot_xy=np.asarray(data.qpos[0:2], dtype=np.float32),
+                        )
+                        for _ in range(3):
+                            comm.send_zero()
+                        last_output_time = now
+                    elif event.accepted and event.key == "F":
+                        last_safe_cmd = np.zeros(3, dtype=np.float32)
+                        zero_reason = "emergency"
+                        for _ in range(3):
+                            comm.send_zero()
+                        last_output_time = now
 
-                if need_tick:
+                decision = mode_controller.get_decision()
+                policy_tick = decision.run_policy and app.adapter.should_tick(now)
+
+                if not decision.run_policy:
+                    if now - last_output_time >= output_interval:
+                        last_safe_cmd = np.zeros(3, dtype=np.float32)
+                        policy_cmd = np.zeros(3, dtype=np.float32)
+                        goal_dist = None
+                        zero_reason = decision.zero_reason_override or "standby"
+                        comm.send_command(0.0, 0.0, 0.0)
+                        last_output_time = now
+                    else:
+                        last_safe_cmd = np.zeros(3, dtype=np.float32)
+                        policy_cmd = np.zeros(3, dtype=np.float32)
+                        zero_reason = decision.zero_reason_override or "standby"
+                elif decision.mode == NavMode.EMERGENCY:
+                    last_safe_cmd = np.zeros(3, dtype=np.float32)
+                    zero_reason = decision.zero_reason_override or "emergency"
+                    if not policy_tick and now - last_output_time >= output_interval:
+                        comm.send_command(0.0, 0.0, 0.0)
+                        last_output_time = now
+
+                if (
+                    camera_visualizer.enabled
+                    and not policy_tick
+                    and now - last_camera_view_time >= camera_view_interval
+                ):
                     try:
+                        rgb_img, depth_img = get_camera_images(
+                            renderer,
+                            data,
+                            cam_id,
+                            hidden_geom_groups=(VIEWER_ONLY_MARKER_GROUP,),
+                        )
+                        camera_visualizer.update(rgb_img, depth_img)
+                        last_camera_view_time = now
+                    except Exception:
+                        traceback.print_exc()
+                        camera_visualizer.close()
+                        camera_visualizer.enabled = False
+
+                if policy_tick:
+                    try:
+                        rgb_img, depth_img = get_camera_images(
+                            renderer,
+                            data,
+                            cam_id,
+                            hidden_geom_groups=(VIEWER_ONLY_MARKER_GROUP,),
+                        )
+                        camera_visualizer.update(rgb_img, depth_img)
+                        last_camera_view_time = now
                         if isinstance(state_packet, NavStatePacketV2):
                             sru_state = state_packet.to_sru_robot_state()
                         else:
@@ -309,6 +428,8 @@ def run(args):
                         if not valid:
                             result = None
                             last_safe_cmd = np.zeros(3, dtype=np.float32)
+                            policy_cmd = np.zeros(3, dtype=np.float32)
+                            goal_dist = None
                             zero_reason = invalid_reason
                         else:
                             result = app.step(
@@ -316,52 +437,67 @@ def run(args):
                                 state=sru_state,
                                 target_pos_w=goal,
                                 timestamp=now,
+                                vx_max=decision.vx_max,
+                                wz_max=decision.wz_max,
+                                print_control=False,
                             )
                             control_info = result["control"] if result else None
                             if control_info is None:
                                 last_safe_cmd = np.zeros(3, dtype=np.float32)
+                                policy_cmd = np.zeros(3, dtype=np.float32)
+                                goal_dist = None
                                 zero_reason = "policy_no_output"
                             else:
-                                last_safe_cmd = np.asarray(control_info["final_cmd"], dtype=np.float32)
-                                zero_reason = control_info["zero_reason"]
+                                policy_cmd = np.asarray(control_info["raw_cmd"], dtype=np.float32)
+                                goal_dist = result["goal_dist"]
+                                if decision.mode == NavMode.EMERGENCY:
+                                    last_safe_cmd = np.zeros(3, dtype=np.float32)
+                                    zero_reason = decision.zero_reason_override or "emergency"
+                                else:
+                                    last_safe_cmd = np.asarray(control_info["final_cmd"], dtype=np.float32)
+                                    zero_reason = control_info["zero_reason"]
 
+                        if not np.all(np.isfinite(policy_cmd)):
+                            policy_cmd = np.zeros(3, dtype=np.float32)
                         if not np.all(np.isfinite(last_safe_cmd)):
                             last_safe_cmd = np.zeros(3, dtype=np.float32)
-                            zero_reason = "command_nan_or_inf"
+                            if decision.mode == NavMode.EMERGENCY:
+                                zero_reason = decision.zero_reason_override or "emergency"
+                            else:
+                                zero_reason = "command_nan_or_inf"
 
-                        latest_rgb_viz = make_rgb_viz(rgb_img) if rgb_img is not None else latest_rgb_viz
-                        latest_depth_viz = make_depth_viz(depth_img) if depth_img is not None else latest_depth_viz
                     except Exception:
                         traceback.print_exc()
                         last_safe_cmd = np.zeros(3, dtype=np.float32)
-                        zero_reason = "exception"
+                        policy_cmd = np.zeros(3, dtype=np.float32)
+                        goal_dist = None
+                        if decision.mode == NavMode.EMERGENCY:
+                            zero_reason = decision.zero_reason_override or "emergency"
+                        else:
+                            zero_reason = "exception"
+
+                    if decision.mode == NavMode.EMERGENCY:
+                        last_safe_cmd = np.zeros(3, dtype=np.float32)
+                        zero_reason = decision.zero_reason_override or "emergency"
 
                     comm.send_command(last_safe_cmd[0], last_safe_cmd[1], last_safe_cmd[2])
+                    last_output_time = now
 
-                    if now - last_print_time >= summary_interval:
-                        print(
-                            "[NavSide SIM] mode={} state_source={} cmd={} sent={} zero_reason={} robot_xy=({:.3f},{:.3f}) goal_dist={:.3f}".format(
-                                "control",
-                                _state_source_name(state_packet),
-                                np.array2string(last_safe_cmd, precision=4),
-                                True,
-                                zero_reason,
-                                float(data.qpos[0]),
-                                float(data.qpos[1]),
-                                float(result["goal_dist"]) if "result" in locals() and result else float("nan"),
-                            )
-                        )
-                        last_print_time = now
+                mode_controller.update_status(
+                    final_cmd=last_safe_cmd,
+                    policy_cmd=policy_cmd,
+                    goal_dist=goal_dist,
+                    zero_reason=zero_reason,
+                    state_source=_state_source_name(state_packet),
+                    robot_xy=np.asarray(data.qpos[0:2], dtype=np.float32),
+                )
 
-                if now - last_render_time >= render_interval:
-                    _enable_viewer_marker_group(viewer)
-                    viewer.sync()
-                    if latest_rgb_viz is not None:
-                        cv2.imshow("NavSide rgb", _resize_viz_for_display(latest_rgb_viz, display_scale))
-                    if latest_depth_viz is not None:
-                        cv2.imshow("NavSide depth", _resize_viz_for_display(latest_depth_viz, display_scale))
-                    cv2.waitKey(1)
-                    last_render_time = now
+                if now - last_print_time >= summary_interval:
+                    print(mode_controller.render_panel(), end="", flush=True)
+                    last_print_time = now
+
+                _enable_viewer_marker_group(viewer)
+                viewer.sync()
 
     except KeyboardInterrupt:
         print("[NavSide] interrupted by user.")
@@ -370,5 +506,9 @@ def run(args):
             comm.send_zero()
         except Exception:
             pass
+        try:
+            mode_controller.stop_input_thread()
+        except Exception:
+            pass
+        camera_visualizer.close()
         comm.stop()
-        cv2.destroyAllWindows()

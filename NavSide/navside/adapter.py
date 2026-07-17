@@ -2,10 +2,10 @@ import os
 import time
 from typing import Dict, Optional
 
-import cv2
 import numpy as np
 from scipy.spatial.transform import Rotation as R
 
+from .image import resize_image
 from .state import SruRobotState
 
 
@@ -90,6 +90,12 @@ class SruNavAdapter:
         if self.last_policy_time is None:
             return True
         return (now - self.last_policy_time) >= self.dry_run_interval
+
+    def reset_recurrent_state(self) -> None:
+        self.last_policy_time = None
+        self.last_action = np.zeros(3, dtype=np.float32)
+        self.h_state = np.zeros((1, 1, LSTM_HIDDEN_DIM), dtype=np.float32)
+        self.c_state = np.zeros((1, 1, LSTM_HIDDEN_DIM), dtype=np.float32)
 
     def step(
         self,
@@ -219,11 +225,7 @@ class SruNavAdapter:
         depth[depth > self.max_depth] = 0.0
         depth[depth < self.min_depth] = 0.0
         depth = self._center_crop_depth(depth, ZED_MINI_CROP_WIDTH, ZED_MINI_CROP_HEIGHT)
-        depth_resized = cv2.resize(
-            depth,
-            (ENCODER_INPUT_WIDTH, ENCODER_INPUT_HEIGHT),
-            interpolation=cv2.INTER_LINEAR,
-        )
+        depth_resized = resize_image(depth, ENCODER_INPUT_WIDTH, ENCODER_INPUT_HEIGHT)
         depth_tensor = depth_resized[np.newaxis, np.newaxis, :, :].astype(np.float32)
         self.last_depth_preprocess_info = {
             "crop_shape": np.array(depth.shape, dtype=np.int32),

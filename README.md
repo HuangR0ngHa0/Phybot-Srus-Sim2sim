@@ -1,143 +1,335 @@
-## IsaacLab 到 MuJoCo 的 sim2sim 工作总结
+# sru_mujoco_sim
 
-本阶段工作的核心不是重新训练导航策略，而是将 IsaacLab/SRU 中训练得到的高层导航模型迁移到 MuJoCo 环境中，接入 Phybot 机器人低层 CPG/RL 行走控制器，构建完整的 sim2sim 闭环导航系统，用于验证策略在不同仿真器、不同机器人动力学和更真实室内场景中的运行效果。
+## IsaacLab/SRU 到 MuJoCo 的 sim2sim 导航闭环
 
-### 1. 搭建 MuJoCo 侧导航闭环架构
+本项目当前目标是把 IsaacLab/SRU 中训练得到的高层导航策略部署到
+MuJoCo 中，并接入 Phybot 的 RobotSide CPG/RL 低层行走控制器，形成
+一个可以在 MuJoCo 室内场景中运行的端到端 sim2sim 导航闭环。
 
-完成了从 IsaacLab 训练模型到 MuJoCo 机器人执行的完整链路：
+当前系统不是训练工程，而是部署和联调工程：
 
 ```text
-IsaacLab/SRU 训练模型
+ProcTHOR / MuJoCo 场景
         ↓
-ONNX 导航模型
+NavSide 渲染 head_camera 深度图
         ↓
-NavSide 深度渲染与状态构造
+VAE encoder ONNX
         ↓
-SRU 导航策略推理
+SRU navigation policy ONNX
         ↓
-输出 vx、vy、wz
+NavSide 状态机限速 / 急停 / 待机决策
         ↓
-UDP 发送速度命令
+UDP 发送 vx, vy, wz
         ↓
 RobotSide CPG/RL locomotion policy
         ↓
 MuJoCo 机器人动力学执行
         ↓
-机器人状态通过 UDP 回传 NavSide
+RobotSide 回传 NavStatePacketV2
+        ↓
+NavSide 下一周期导航推理
 ```
 
-其中，NavSide 负责高层视觉导航推理，RobotSide 负责机器人动力学仿真、状态机和低层行走控制，二者通过 UDP 形成状态反馈与速度控制闭环。
+NavSide 负责视觉导航、ONNX 推理、人机交互状态机和高层速度输出。
+RobotSide 负责 MuJoCo 物理仿真、状态机、CPG/RL 行走控制和机器人状态回传。
 
-### 2. 完成导航模型 ONNX 推理接入
+---
 
-将训练侧导航模型部署到 NavSide，当前使用的主要模型包括：
-
-* `vae_encoder.onnx`
-* `nav_policy.onnx`
-
-NavSide 将 MuJoCo 深度图和机器人状态转换为训练模型所需的观测格式：
+## 当前工作空间架构
 
 ```text
-深度图
-→ 裁剪与缩放
-→ VAE encoder
-→ 2560 维视觉特征
-
-视觉特征 + 16 维机器人状态
-→ 2576 维导航观测
-→ SRU policy
-→ vx、vy、wz
+sru_mujoco_sim/
+├── README.md
+├── NavSide/
+│   ├── scripts/run_nav.py
+│   ├── navside/
+│   │   ├── mode.py        # 人机交互状态机 + ANSI 面板
+│   │   ├── sim.py         # MuJoCo viewer + NavSide 主循环
+│   │   ├── runtime.py     # NavSideApp，单次导航推理封装
+│   │   ├── adapter.py     # depth -> ONNX encoder -> obs -> ONNX policy -> cmd
+│   │   ├── bridge.py      # UDP 状态包解析和速度命令发送
+│   │   ├── depth.py       # MuJoCo depth 渲染
+│   │   ├── image.py       # 无 cv2 的本地图像 resize 工具
+│   │   └── state.py       # SRU 机器人状态 dataclass
+│   ├── config/
+│   │   ├── nav.yaml
+│   │   ├── nav_molmospaces.yaml
+│   │   └── nav_molmospaces_procthor.yaml
+│   ├── asset/
+│   │   ├── models/
+│   │   │   ├── vae_encoder.onnx
+│   │   │   └── nav_policy.onnx
+│   │   ├── robot/
+│   │   └── merged/
+│   └── docs/
+│       ├── navside_readme.md
+│       └── navside_baseline.md
+└── PhybotSofware/
+    ├── build/main      # 当前 RobotSide 启动入口
+    ├── RL_deploy_cpg/
+    ├── RL_deploy_mimic/
+    ├── ZeroState/
+    ├── StateMachine/
+    ├── MujocoInterface/
+    └── ...
 ```
 
-同时保留循环网络的隐藏状态更新，使策略能够连续利用历史观测，而不是仅依赖单帧深度图进行决策。
+---
 
-### 3. 接入 MolmoSpaces/ProcTHOR 真实室内场景
+## 运行环境
 
-为避免只在空地或简单障碍物环境中测试，接入了 MolmoSpaces 场景资源。
+### NavSide 推荐 Python
 
-前期尝试了 iTHOR `FloorPlan1`，但该场景面积较小，更偏向视觉操作和 VLA 任务，不适合长距离导航测试。后续改用 ProcTHOR-10k 的 `val_0` 多房间场景，并生成机器人与环境合并后的 MuJoCo XML：
+不要使用系统 `/usr/bin/python3` 直接运行 NavSide。推荐在目标设备上准备一个
+Conda 环境，环境名建议为：
+
+```bash
+env_sru_ort
+```
+
+该环境需要至少能导入：
 
 ```text
-NavSide/asset/merged/
-phybot_molmospaces_procthor_val0.xml
+numpy
+yaml / PyYAML
+onnxruntime
+mujoco
 ```
 
-该场景包含 Phybot 机器人、墙体、房间结构和室内障碍物，可用于测试跨房间导航、转角避障和长距离目标跟踪。
+在当前开发设备上，这个环境的 Python 路径是：
 
-场景合并工具还完成了：
+```bash
+/home/ubuntu/miniconda3/envs/env_sru_ort/bin/python
+```
 
-* 场景资源路径处理；
-* XML 资产合并；
-* 场景对象名称前缀化；
-* 名称冲突避免；
-* 原有测试障碍物清理；
-* 机器人出生位置配置；
-* MuJoCo XML 可加载性检查。
+其他设备不应依赖这个绝对路径；优先使用：
 
-### 4. 对齐 IsaacLab 训练侧深度相机输入
+```bash
+conda activate env_sru_ort
+python -c "import numpy, yaml, onnxruntime, mujoco; print('NavSide env ok')"
+```
 
-针对训练侧和 MuJoCo 侧深度图分布不一致的问题，对相机输入链路进行了严格适配。
+### RobotSide 运行环境
 
-训练侧等效处理流程为：
+RobotSide 当前使用 `PhybotSofware/build/main` 作为运行入口。
+它是已经构建好的 MuJoCo/RobotSide 程序，不通过 NavSide 的 Python 环境启动。
+
+---
+
+## 部署和启动顺序
+
+推荐使用两个终端。
+
+### 1. 启动 RobotSide
+
+终端 1：
+
+```bash
+cd /home/ubuntu/sru_mujoco_sim/PhybotSofware/build
+./main
+```
+
+启动后程序会询问：
 
 ```text
-原始分辨率：1920 × 1200
-中心裁剪：1728 × 1080
-最终输入：64 × 40
-深度范围：0.10 ～ 10.0 m
-垂直视场角：57°
-导航频率：约 5 Hz
+Start in RL_walk state? [y/N]:
 ```
 
-MuJoCo 侧最终复现为：
+输入：
+
+```text
+y
+```
+
+正常启动日志中应看到类似信息：
+
+```text
+MuJoCo version 3.1.1
+Start in RL_walk state? [y/N]: y
+UDP Socket Initialized on port 8080
+...
+interface load success!
+model load success!
+Success transition: 1 → 2
+```
+
+RobotSide 会监听 UDP `8080`，接收 NavSide 发送的 `vx, vy, wz`。
+
+日志中可能出现：
+
+```text
+[RobotSide] NavSide spawn config unavailable at ../NavSide/config/nav_molmospaces_procthor.yaml: bad file: ../NavSide/config/nav_molmospaces_procthor.yaml
+[RobotSide] spawn source=../../NavSide/config/nav_molmospaces_procthor.yaml
+[RobotSide] applied spawn_w=[15, 6.5, 0.695] spawn_yaw=1.5708
+```
+
+这里第一行是相对路径尝试失败；如果后面出现 `spawn source=...` 和
+`applied spawn_w=...`，说明 fallback 路径已成功读取并应用出生点配置。
+
+如果出现：
+
+```text
+xbox init fail
+```
+
+在当前 sim2sim 链路中不一定是致命错误。RobotSide 主要通过 UDP 接收 NavSide
+速度命令，不依赖 Xbox 手柄完成本次导航闭环验证。
+
+### 2. 启动 NavSide
+
+终端 2：
+
+```bash
+cd /home/ubuntu/sru_mujoco_sim/NavSide
+conda activate env_sru_ort
+python -B scripts/run_nav.py --sim-control --config config/nav.yaml
+```
+
+启动后 NavSide 会：
+
+- 打开 MuJoCo viewer；
+- 启动终端 ANSI 状态面板；
+- 在默认 `STANDBY` 下持续发送零速；
+- 接收 RobotSide 回传的 `NavStatePacketV2`；
+- 根据用户输入切换导航模式。
+
+#如果需要相机的RGB以及DEEP视角，可以用--show-camera启动gui
+
+```bash
+cd /home/ubuntu/sru_mujoco_sim/NavSide
+conda activate env_sru_ort
+python3 -B scripts/run_nav.py \
+    --sim-control \
+    --config config/nav.yaml \
+    --show-camera
+```
+
+启动后 NavSide 会：
+
+- 打开 MuJoCo viewer；
+- 打开 RGB、DEEP GUI；
+- 启动终端 ANSI 状态面板；
+- 在默认 `STANDBY` 下持续发送零速；
+- 接收 RobotSide 回传的 `NavStatePacketV2`；
+- 根据用户输入切换导航模式。
+
+
+---
+
+## NavSide 人机交互状态机
+
+启动后默认进入 `STANDBY`。
+
+按键需要在 NavSide 终端输入字母后按 Enter。
+
+| 功能 | 按键 | 状态 | 网络推理 | UDP 输出 |
+|---|---:|---|---|---|
+| 待机 | `A + Enter` | `STANDBY` | 停止 | `0,0,0` |
+| 低速运行 | `S + Enter` | `LOW_SPEED` | 运行 | 限速输出 |
+| 中速运行 | `D + Enter` | `MEDIUM_SPEED` | 运行 | 限速输出 |
+| 紧急制动 | `F + Enter` | `EMERGENCY` | 继续运行 | 强制 `0,0,0` |
+| 退出到待机 | `G + Enter` | `STANDBY` | 停止 | `0,0,0` |
+
+注意：
+
+- `G` 是“Q/退出模式”的实际按键，但它不退出程序，只回到待机。
+- `F` 急停后可以直接按 `S` 或 `D` 恢复运行。
+- `A/G` 会重置 SRU policy 的 recurrent state，并发送 3 个零速包。
+- `F` 不重置 recurrent state，因为 Emergency 期间网络仍继续推理。
+- `vy` 在 NavSide 输出端保持强制为 `0`。
+
+限速规则：
+
+```text
+LOW_SPEED:
+  vx <= 0.6
+  |wz| <= 0.8
+
+MEDIUM_SPEED:
+  vx <= 1.0
+  |wz| <= 1.3
+
+EMERGENCY:
+  final UDP command = 0,0,0
+  policy_cmd 仍会在面板中更新，用于确认网络继续运行
+```
+
+---
+
+## NavSide 模型输入和推理链路
+
+当前 ONNX 模型：
+
+```text
+NavSide/asset/models/vae_encoder.onnx
+NavSide/asset/models/nav_policy.onnx
+```
+
+深度图处理流程：
 
 ```text
 MuJoCo head_camera
-→ fovy = 57°
 → 渲染 1920 × 1200
 → 中心裁剪 1728 × 1080
 → resize 到 64 × 40
 → 输入 shape = [1, 1, 40, 64]
-→ SRU depth encoder
+→ VAE encoder
+→ 2560 维 depth feature
 ```
 
-相比早期直接采用 `848 × 480 → 64 × 40` 的简化方式，该方案更接近 IsaacLab 训练时的相机视场和图像处理分布，从而减少 sim2sim 中的视觉输入偏差。
-
-同时增加了启动阶段的分辨率硬校验，避免配置错误时继续运行：
+导航观测：
 
 ```text
-renderer size must be at least 1920 × 1200
+linear_vel_b[3]
+angular_vel_b[3]
+projected_gravity_b[3]
+last_action[3]
+target_position[4]
+depth_feature[2560]
 ```
 
-GUI 中的 RGB 和 depth 窗口采用单独缩放显示，该缩放仅影响可视化，不改变模型输入。
-
-### 5. 打通 NavSide 与 RobotSide 的 UDP 状态和控制接口
-
-NavSide 与 RobotSide 之间实现了双向 UDP 通信。
-
-NavSide 向 RobotSide 发送：
+总维度：
 
 ```text
-vx
-vy
-wz
+obs dim = 2576
 ```
 
-RobotSide 向 NavSide 回传 `NavStatePacketV2`，主要包含：
+策略输出：
 
 ```text
-序列号
-时间戳
-本体坐标系线速度
-本体坐标系角速度
-投影重力方向
-机器人世界坐标位置
-机器人世界坐标四元数
+raw_action[3]
+→ tanh + scale
+→ cmd_vel = vx, vy, wz
+→ 状态机限速或强制零速
+→ UDP 发送到 RobotSide
 ```
 
-RobotSide 采用非阻塞 UDP 接收方式，避免网络通信阻塞底层控制循环。
+控制频率：
 
-接收到导航速度后，RobotSide 将其写入低层控制命令：
+```text
+5 Hz
+```
+
+---
+
+## UDP 通信契约
+
+### NavSide → RobotSide
+
+NavSide 发送到：
+
+```text
+127.0.0.1:8080
+```
+
+数据格式：
+
+```text
+struct 3f
+vx, vy, wz
+```
+
+RobotSide 接收到后写入低层控制命令：
 
 ```text
 js_vx_desire
@@ -145,117 +337,180 @@ js_vy_desire
 js_OmegaZ_desire
 ```
 
-经过速度缩放后拼接到底层 locomotion policy 的观测中，由 CPG/RL 行走策略生成机器人关节控制量。
+### RobotSide → NavSide
 
-RobotSide 同时从 MuJoCo 和 `DataPackage` 中读取机器人位置、姿态、角速度和重力方向，并回传给 NavSide。NavSide 使用 `nav_state_v2` 作为真实状态源，从而形成真正的闭环，而不是仅依赖本地 MuJoCo 镜像状态。
+RobotSide 回传到：
 
-### 6. 实现出生点、朝向和目标点统一配置
-
-在 NavSide 配置中增加了：
-
-```yaml
-sim:
-  spawn_w: [x, y, z]
-  spawn_yaw: yaw
-
-goal:
-  default_goal_w: [x, y, z]
+```text
+127.0.0.1:8081
 ```
 
-当前可以通过：
+NavSide 期望状态包：
+
+```text
+NavStatePacketV2
+84 bytes
+struct: <IHHId16f
+magic: 0x32555253
+version: 2
+```
+
+包含：
+
+```text
+seq
+timestamp_sec
+linear_vel_b[3]
+angular_vel_b[3]
+projected_gravity_b[3]
+robot_pos_w[3]
+robot_quat_wxyz[4]
+```
+
+NavSide 面板中如果看到：
+
+```text
+state_source: nav_state_v2
+```
+
+说明 NavSide 正在使用 RobotSide 回传状态。  
+如果看到：
+
+```text
+state_source: mujoco_mirror
+```
+
+说明 NavSide 当前没有收到 RobotSide 状态包，只能使用本地 MuJoCo 镜像状态。
+
+---
+
+## ProcTHOR / MolmoSpaces 场景
+
+当前已接入 MolmoSpaces/ProcTHOR 多房间场景。主要合并 XML 位于：
+
+```text
+NavSide/asset/merged/phybot_molmospaces_procthor_val0.xml
+```
+
+ProcTHOR 配置位于：
 
 ```text
 NavSide/config/nav_molmospaces_procthor.yaml
 ```
 
-统一配置：
+其中包含：
 
-* 机器人出生位置；
-* 机器人初始朝向；
-* 导航目标点。
+```yaml
+sim:
+  spawn_w: [15, 6.5, 0.695]
+  spawn_yaw: 1.57079632679
 
-早期仅修改 NavSide 出生点时，RobotSide 的状态会通过 UDP 将其覆盖，导致两侧初始位置不一致。
-
-为解决该问题，修改了 RobotSide MuJoCo 启动程序，使其启动时读取同一份 NavSide 配置文件，并将 `spawn_w` 和 `spawn_yaw` 写入 MuJoCo 初始 `qpos`。由此保证：
-
-```text
-NavSide 视觉场景初始位姿
-=
-RobotSide 物理仿真初始位姿
+goal:
+  default_goal_w: [5.0, 3, 0.0]
 ```
 
-### 7. 增加可视化和调试工具
+RobotSide 启动时会尝试读取 NavSide 配置中的出生点，使 RobotSide 物理仿真初始位姿与
+NavSide 视觉侧一致。
 
-为了便于检查导航链路，增加了以下可视化功能：
+---
 
-* NavSide RGB 图像窗口；
-* NavSide depth 图像窗口；
-* MuJoCo Viewer；
-* 出生点和目标点标记；
-* 状态来源、速度命令、机器人位置和目标距离日志。
+## 常用检查命令
 
-标记定义为：
+### XML 检查
 
-```text
-蓝色：机器人出生点
-红色：导航目标点
+```bash
+cd /home/ubuntu/sru_mujoco_sim/NavSide
+conda activate env_sru_ort
+python tools/check_mujoco_xml.py asset/robot/phybot_mini_mark2/xml/phybot_real.xml --camera-name head_camera
 ```
 
-这些 marker：
-
-* 不参与物理碰撞；
-* 不进入机器人 RGB/depth 相机；
-* 不影响导航策略输入；
-* 只用于上帝视角调试。
-
-同时保留相机外参调整接口，可通过修改 `head_camera` 的位置参数调整相机安装高度和偏移。
-
-### 8. 当前 sim2sim 验证结果
-
-目前已完成并验证：
-
-* MuJoCo 合并场景 XML 能够正常加载；
-* ProcTHOR 多房间场景能够显示；
-* `head_camera` 能够被正确识别；
-* RGB 和 depth 渲染正常；
-* 相机分辨率、视场角和深度范围已与训练侧对齐；
-* ONNX encoder 和 navigation policy 能够正常初始化；
-* SRU 导航推理能够连续运行；
-* NavSide 能够输出 `vx、vy、wz`；
-* RobotSide 能够接收并执行速度命令；
-* RobotSide 状态能够通过 `nav_state_v2` 回传；
-* NavSide 能够使用回传状态更新机器人位姿；
-* `robot_xy` 和 `goal_dist` 能够随机器人运动变化；
-* NavSide 与 RobotSide 出生点保持一致；
-* 整体系统已形成完整 sim2sim 闭环。
-
-日志中出现：
+成功时应看到：
 
 ```text
-state_source=nav_state_v2
-cmd=[...]
-robot_xy=(...)
-goal_dist=...
+camera_name=head_camera camera_id=0
 ```
 
-说明当前系统已经实现：
+### Python 编译检查
 
-```text
-视觉观测
-→ 导航推理
-→ 速度控制
-→ 低层行走
-→ 机器人运动
-→ 状态反馈
-→ 下一周期导航推理
+```bash
+cd /home/ubuntu/sru_mujoco_sim/NavSide
+conda activate env_sru_ort
+python -m py_compile navside/mode.py navside/sim.py navside/runtime.py navside/adapter.py navside/depth.py navside/image.py scripts/run_nav.py
 ```
 
-### 总结
+成功时无输出。
 
-本阶段完成了 IsaacLab/SRU 导航策略向 MuJoCo 的 sim2sim 迁移。系统采用 NavSide 与 RobotSide 双侧架构：NavSide 负责 MuJoCo 场景视觉渲染、深度预处理、SRU ONNX 推理和高层速度输出；RobotSide 负责机器人动力学仿真、状态机、CPG/RL 低层行走控制和机器人状态回传。
+### 确认没有 OpenCV 依赖
 
-同时接入了 ProcTHOR 多房间真实室内场景，对齐了 IsaacLab 训练侧的深度相机参数和图像处理流程，补充了出生点、目标点、相机、可视化和 UDP 通信接口，最终实现了从导航感知、策略推理、高层速度输出到低层运动执行和状态反馈的完整闭环。
+```bash
+cd /home/ubuntu/sru_mujoco_sim/NavSide
+rg -n "\bcv2\b|opencv|OpenCV" .
+```
 
-一句话概括：
+预期无输出。
 
-> 将 IsaacLab 中训练得到的 SRU 导航策略，通过 ONNX 部署到 MuJoCo 的 NavSide 中，并与 Phybot RobotSide 的 CPG/RL 行走控制器通过 UDP 连接，在 ProcTHOR 多房间场景中实现了深度感知、导航推理、速度控制、物理执行和状态回传的完整 sim2sim 闭环。
+### UDP 监听 NavSide 输出
+
+如果暂时不启动 RobotSide，可以用本地 UDP 监听器占用 `8080` 验证 NavSide 发包。
+注意：这个监听器不能和 RobotSide 同时监听同一个端口。
+
+```bash
+cd /home/ubuntu/sru_mujoco_sim/NavSide
+conda activate env_sru_ort
+python -c "
+import socket, struct, time
+sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+sock.bind(('127.0.0.1', 8080))
+sock.settimeout(30.0)
+t0 = time.time()
+count = 0
+try:
+    while time.time() - t0 < 60:
+        data, addr = sock.recvfrom(1024)
+        if len(data) == 12:
+            vx, vy, wz = struct.unpack('3f', data)
+            count += 1
+            print(f'{time.time()-t0:8.3f}s #{count:03d} cmd=({vx:.4f},{vy:.4f},{wz:.4f}) from={addr}', flush=True)
+        else:
+            print(f'bad packet len={len(data)} from={addr}', flush=True)
+except socket.timeout:
+    print('timeout')
+finally:
+    print(f'total_packets={count}')
+"
+```
+
+---
+
+## 当前验证状态
+
+已完成：
+
+- `py_compile` 通过；
+- MuJoCo XML 检查通过，`head_camera` 的 `camera_id=0`；
+- `env_sru_ort` 下 NavSide 可启动；
+- MuJoCo viewer 可进入主循环；
+- 终端 ANSI 面板可原地刷新；
+- A/S/D/F/G 交互验证通过；
+- STANDBY 周期零速通过；
+- LOW_SPEED 限速输出通过；
+- EMERGENCY 即时零速和持续零速通过；
+- EMERGENCY 下 `policy_cmd` 仍变化，说明网络继续推理；
+- G 回 STANDBY 且不退出程序；
+- UDP 本地监听验证通过；
+- RobotSide 联调已确认程序可以正常运行。
+
+仍需按具体实验继续观察：
+
+- 真实长时间导航成功率；
+- 不同 ProcTHOR 场景和目标点下的避障表现；
+- RobotSide 对 A/G 三连零速的下游消费节拍；
+- Emergency 长时间保持时的机器人侧响应。
+
+---
+
+## 一句话概括
+
+本项目当前已经形成了 `NavSide 视觉导航 + 人机交互安全状态机 + UDP 高层速度命令`
+与 `RobotSide CPG/RL 低层行走控制 + MuJoCo 物理执行 + 状态回传` 的完整 sim2sim 闭环，
+可以在 MuJoCo 室内场景中通过 A/S/D/F/G 进行待机、低速、中速、急停和回待机控制。

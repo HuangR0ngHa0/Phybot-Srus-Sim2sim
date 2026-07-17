@@ -27,8 +27,6 @@ sim:
   camera_name: head_camera
   render_width: 1920
   render_height: 1200
-  render_fps: 30.0
-  display_scale: 0.5
 
 udp:
   local_ip: 127.0.0.1
