@@ -1,19 +1,21 @@
 # NavSide Baseline
 
 ## Frozen facts
-- Backend: `tensorrt`
-- Encoder model: `models/vae_pretrain_new.onnx`
-- Encoder engine: `models/vae_pretrain_new.plan`
-- Policy model: `models/policy_1.onnx`
-- Policy engine: `models/policy_1.plan`
+- Encoder model: `models/vae_encoder.onnx`
+- Policy model: `models/nav_policy.onnx`
 - Depth embedding dim: 2560
 - Obs dim: 2576
-- Control gate: 8 Hz
+- Control gate: 5 Hz
 - Walk threshold: 0.3
+- Temporary navigation clamp:
+  - vx: [0.0, 0.45]
+  - vy: 0.0
+  - wz: [-0.4, 0.4]
 - Goal stop: enabled
 
 ## Intent
-Keep only the SRU navigation core required for the current TensorRT sim2sim path.
+Keep only the SRU navigation core required for sim2sim.
+Do not bring VIPlanner legacy paths into NavSide.
 
 ## Sim mode
 - `--sim-control`: MuJoCo depth + SRU policy + UDP command send to robot-side `8080`.

@@ -8,13 +8,14 @@ import yaml
 from .runtime import NavSideApp
 from .bridge import NavStatePacketV2, RobotComm
 from .depth import get_camera_images
+from .mode import NavMode, NavModeController
 from .state import SruRobotState
 from .timing import timing_log
 
 try:
     import mujoco
     import mujoco.viewer
-except Exception as exc:  # pragma: no cover - runtime dependency check
+except Exception as exc:
     raise RuntimeError(
         "NavSide sim requires the MuJoCo Python binding in the active Python environment."
     ) from exc
@@ -227,6 +228,8 @@ def run(args):
 
     app = NavSideApp.from_config(args.config)
     app.adapter.verbose = bool(args.verbose_sru or log_cfg.get("verbose_sru", False))
+    app.adapter.reset_recurrent_state()
+    mode_controller = NavModeController()
 
     comm = RobotComm(
         local_ip=udp_cfg.get("local_ip", "127.0.0.1"),
@@ -269,13 +272,24 @@ def run(args):
     )
     print(f"[NavSide] ignore_udp_state={ignore_udp_state}")
 
-    last_safe_cmd = np.zeros(3, dtype=np.float32)
+    zero_vec = np.zeros(3, dtype=np.float32)
+    last_safe_cmd = zero_vec.copy()
+    policy_cmd = zero_vec.copy()
+    zero_reason = "standby"
+    goal_dist = None
     last_print_time = 0.0
+    last_output_time = 0.0
+    output_interval = 1.0 / max(app.config.dry_run_hz, 1e-6)
     first_control_loop_logged = False
     first_render_logged = False
     viewer_launch_t0 = time.perf_counter()
 
+    def _send_zero_burst(count: int) -> None:
+        for _ in range(max(int(count), 0)):
+            comm.send_zero()
+
     try:
+        mode_controller.start_input_thread()
         with mujoco.viewer.launch_passive(model, data) as viewer:
             timing_log("sim_viewer_launch", time.perf_counter() - viewer_launch_t0)
             _enable_viewer_marker_group(viewer)
@@ -284,35 +298,62 @@ def run(args):
                     timing_log("sim_first_control_loop_entry", time.perf_counter() - run_t0)
                     first_control_loop_logged = True
                 now = time.time()
+
+                for event in mode_controller.poll_events():
+                    if not event.accepted:
+                        continue
+                    if event.key in ("A", "G"):
+                        app.adapter.reset_recurrent_state()
+                        last_safe_cmd = zero_vec.copy()
+                        policy_cmd = zero_vec.copy()
+                        goal_dist = None
+                        zero_reason = "quit_to_standby" if event.key == "G" else "standby"
+                        _send_zero_burst(3)
+                        last_output_time = now
+                    elif event.key == "F":
+                        last_safe_cmd = zero_vec.copy()
+                        policy_cmd = zero_vec.copy()
+                        zero_reason = "emergency"
+                        _send_zero_burst(3)
+                        last_output_time = now
+
+                decision = mode_controller.get_decision()
                 state_packet = None if ignore_udp_state else comm.get_latest_state()
                 if state_packet is not None:
                     _apply_udp_state_to_mujoco(data, state_packet)
                     mujoco.mj_forward(model, data)
 
-                need_tick = app.adapter.should_tick(now)
-                rgb_img = None
-                depth_img = None
-                if need_tick:
-                    rgb_img, depth_img = get_camera_images(
-                        renderer,
-                        data,
-                        cam_id,
-                        hidden_geom_groups=(VIEWER_ONLY_MARKER_GROUP,),
-                    )
-                    if not first_render_logged:
-                        timing_log("sim_first_frame_render", time.perf_counter() - run_t0)
-                        first_render_logged = True
+                policy_tick = decision.run_policy and app.adapter.should_tick(now)
 
-                if need_tick:
+                if not decision.run_policy:
+                    last_safe_cmd = zero_vec.copy()
+                    policy_cmd = zero_vec.copy()
+                    if zero_reason not in ("quit_to_standby", "emergency"):
+                        zero_reason = "standby"
+                    if now - last_output_time >= output_interval:
+                        comm.send_zero()
+                        last_output_time = now
+                elif policy_tick:
+                    depth_img = None
                     try:
+                        rgb_img, depth_img = get_camera_images(
+                            renderer,
+                            data,
+                            cam_id,
+                            hidden_geom_groups=(VIEWER_ONLY_MARKER_GROUP,),
+                        )
+                        if not first_render_logged:
+                            timing_log("sim_first_frame_render", time.perf_counter() - run_t0)
+                            first_render_logged = True
+
                         if isinstance(state_packet, NavStatePacketV2):
                             sru_state = state_packet.to_sru_robot_state()
                         else:
                             sru_state = _mujoco_state_from_data(data)
                         valid, invalid_reason = _validate_inputs(depth_img, sru_state, goal)
                         if not valid:
-                            result = None
-                            last_safe_cmd = np.zeros(3, dtype=np.float32)
+                            last_safe_cmd = zero_vec.copy()
+                            policy_cmd = zero_vec.copy()
                             zero_reason = invalid_reason
                         else:
                             result = app.step(
@@ -320,40 +361,56 @@ def run(args):
                                 state=sru_state,
                                 target_pos_w=goal,
                                 timestamp=now,
+                                vx_max=decision.vx_max,
+                                wz_max=decision.wz_max,
+                                print_control=False,
                             )
                             control_info = result["control"] if result else None
                             if control_info is None:
-                                last_safe_cmd = np.zeros(3, dtype=np.float32)
+                                policy_cmd = zero_vec.copy()
+                                last_safe_cmd = zero_vec.copy()
                                 zero_reason = "policy_no_output"
                             else:
-                                last_safe_cmd = np.asarray(control_info["final_cmd"], dtype=np.float32)
+                                policy_cmd = np.asarray(control_info["raw_cmd"], dtype=np.float32).copy()
+                                last_safe_cmd = np.asarray(control_info["final_cmd"], dtype=np.float32).copy()
                                 zero_reason = control_info["zero_reason"]
+                                goal_dist = float(result["goal_dist"])
 
                         if not np.all(np.isfinite(last_safe_cmd)):
-                            last_safe_cmd = np.zeros(3, dtype=np.float32)
+                            last_safe_cmd = zero_vec.copy()
                             zero_reason = "command_nan_or_inf"
 
                     except Exception:
                         traceback.print_exc()
-                        last_safe_cmd = np.zeros(3, dtype=np.float32)
-                        zero_reason = "exception"
+                        last_safe_cmd = zero_vec.copy()
+                        policy_cmd = zero_vec.copy()
+                        zero_reason = "emergency" if decision.mode == NavMode.EMERGENCY else "exception"
+
+                    if decision.mode == NavMode.EMERGENCY:
+                        last_safe_cmd = zero_vec.copy()
+                        zero_reason = "emergency"
 
                     comm.send_command(last_safe_cmd[0], last_safe_cmd[1], last_safe_cmd[2])
+                    last_output_time = now
 
-                    if now - last_print_time >= summary_interval:
-                        print(
-                            "[NavSide SIM] mode={} state_source={} cmd={} sent={} zero_reason={} robot_xy=({:.3f},{:.3f}) goal_dist={:.3f}".format(
-                                "control",
-                                _state_source_name(state_packet),
-                                np.array2string(last_safe_cmd, precision=4),
-                                True,
-                                zero_reason,
-                                float(data.qpos[0]),
-                                float(data.qpos[1]),
-                                float(result["goal_dist"]) if "result" in locals() and result else float("nan"),
-                            )
-                        )
-                        last_print_time = now
+                elif decision.mode == NavMode.EMERGENCY and now - last_output_time >= output_interval:
+                    last_safe_cmd = zero_vec.copy()
+                    zero_reason = "emergency"
+                    comm.send_zero()
+                    last_output_time = now
+
+                mode_controller.update_status(
+                    final_cmd=last_safe_cmd,
+                    policy_cmd=policy_cmd,
+                    goal_dist=goal_dist,
+                    zero_reason=zero_reason,
+                    state_source=_state_source_name(state_packet),
+                    robot_xy=np.asarray(data.qpos[0:2], dtype=np.float32),
+                )
+
+                if now - last_print_time >= summary_interval:
+                    print(mode_controller.render_panel(), end="", flush=True)
+                    last_print_time = now
 
                 _enable_viewer_marker_group(viewer)
                 viewer.sync()
@@ -361,6 +418,10 @@ def run(args):
     except KeyboardInterrupt:
         print("[NavSide] interrupted by user.")
     finally:
+        try:
+            mode_controller.stop_input_thread()
+        except Exception:
+            pass
         try:
             comm.send_zero()
         except Exception:

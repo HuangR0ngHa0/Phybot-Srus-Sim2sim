@@ -18,10 +18,7 @@ DEFAULT_CONFIG = Path(__file__).resolve().parents[1] / "config" / "nav.yaml"
 class NavSideConfig:
     encoder_path: str
     policy_path: str
-    encoder_engine_path: str
-    policy_engine_path: str
-    inference_backend: str = "tensorrt"
-    dry_run_hz: float = 8.0
+    dry_run_hz: float = 5.0
     vx_max: float = 1
     wz_max: float = 1.5
     walk_threshold: float = 0.3
@@ -42,12 +39,9 @@ def load_nav_config(config_path: str) -> NavSideConfig:
     goal_cfg = data.get("goal", {})
     base_dir = Path(config_path).resolve().parent
     config = NavSideConfig(
-        encoder_path=str(base_dir / model_cfg.get("encoder_path", "../asset/models/vae_pretrain_new.onnx")),
-        policy_path=str(base_dir / model_cfg.get("policy_path", "../asset/models/policy_1.onnx")),
-        encoder_engine_path=str(base_dir / model_cfg.get("encoder_engine_path", "../asset/models/vae_pretrain_new.plan")),
-        policy_engine_path=str(base_dir / model_cfg.get("policy_engine_path", "../asset/models/policy_1.plan")),
-        inference_backend=str(model_cfg.get("inference_backend", "tensorrt")),
-        dry_run_hz=float(control_cfg.get("dry_run_hz", 8.0)),
+        encoder_path=str(base_dir / model_cfg.get("encoder_path", "../models/vae_encoder.onnx")),
+        policy_path=str(base_dir / model_cfg.get("policy_path", "../models/policy.onnx")),
+        dry_run_hz=float(control_cfg.get("dry_run_hz", 5.0)),
         vx_max=float(control_cfg.get("vx_max", 0.45)),
         wz_max=float(control_cfg.get("wz_max", 0.4)),
         walk_threshold=float(control_cfg.get("walk_threshold", 0.3)),
@@ -73,9 +67,6 @@ class NavSideApp:
             min_depth=config.min_depth,
             max_depth=config.max_depth,
             verbose=config.verbose_sru,
-            inference_backend=config.inference_backend,
-            encoder_engine_path=config.encoder_engine_path,
-            policy_engine_path=config.policy_engine_path,
         )
         timing_log("runtime_adapter_construct", time.perf_counter() - adapter_t0)
         self.last_final_cmd = np.zeros(3, dtype=np.float32)
@@ -103,6 +94,10 @@ class NavSideApp:
         state: SruRobotState,
         target_pos_w: np.ndarray,
         timestamp: float | None = None,
+        vx_max: float | None = None,
+        wz_max: float | None = None,
+        walk_threshold: float | None = None,
+        print_control: bool = True,
     ):
         diag = self.adapter.step(
             depth_img=depth_img,
@@ -113,11 +108,15 @@ class NavSideApp:
         if diag is None:
             return None
 
+        vx_limit = self.config.vx_max if vx_max is None else vx_max
+        wz_limit = self.config.wz_max if wz_max is None else wz_max
+        walk_limit = self.config.walk_threshold if walk_threshold is None else walk_threshold
+
         control_info = self.adapter.build_control_command(
             diag,
-            vx_max=self.config.vx_max,
-            wz_max=self.config.wz_max,
-            walk_threshold=self.config.walk_threshold,
+            vx_max=vx_limit,
+            wz_max=wz_limit,
+            walk_threshold=walk_limit,
         )
 
         goal_dist = float(np.linalg.norm(np.asarray(diag["target_vec_b"], dtype=np.float32)))
@@ -128,16 +127,17 @@ class NavSideApp:
             control_info["above_walk_threshold"] = False
 
         self.last_final_cmd = np.asarray(control_info["final_cmd"], dtype=np.float32).copy()
-        print(
-            "[NavSide] control raw={} final={} walk_threshold={} above_walk_threshold={} zero_reason={} goal_dist={:.4f}".format(
-                np.array2string(control_info["raw_cmd"], precision=4),
-                np.array2string(control_info["final_cmd"], precision=4),
-                control_info["walk_threshold"],
-                control_info["above_walk_threshold"],
-                control_info["zero_reason"],
-                goal_dist,
+        if print_control:
+            print(
+                "[NavSide] control raw={} final={} walk_threshold={} above_walk_threshold={} zero_reason={} goal_dist={:.4f}".format(
+                    np.array2string(control_info["raw_cmd"], precision=4),
+                    np.array2string(control_info["final_cmd"], precision=4),
+                    control_info["walk_threshold"],
+                    control_info["above_walk_threshold"],
+                    control_info["zero_reason"],
+                    goal_dist,
+                )
             )
-        )
 
         return {
             "diag": diag,

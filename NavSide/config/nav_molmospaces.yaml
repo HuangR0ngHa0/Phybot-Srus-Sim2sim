@@ -1,12 +1,9 @@
 models:
-  inference_backend: tensorrt
-  encoder_engine_path: ../asset/models/vae_pretrain_new.plan
-  policy_engine_path: ../asset/models/policy_1.plan
-  encoder_path: ../asset/models/vae_pretrain_new.onnx
-  policy_path: ../asset/models/policy_1.onnx
+  encoder_path: ../asset/models/vae_encoder.onnx
+  policy_path: ../asset/models/nav_policy.onnx
 
 control:
-  dry_run_hz: 8.0
+  dry_run_hz: 5.0
   vx_max: 1
   wz_max: 1.5
   walk_threshold: 0.3
